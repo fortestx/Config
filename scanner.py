@@ -163,8 +163,8 @@ async def scan_configs(configs):
 
 async def pcloud_upload(content):
 
-    login_url = "https://api.pcloud.com/login"
-    upload_url = "https://api.pcloud.com/uploadfile"
+    login_url = "https://eapi.pcloud.com/login"
+    upload_url = "https://eapi.pcloud.com/uploadfile"
 
     async with aiohttp.ClientSession() as session:
 
