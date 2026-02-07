@@ -1,0 +1,35 @@
+name: VLESS Scanner
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */3 * * *"   # her 3 saat
+
+jobs:
+  scan:
+    runs-on: ${{ matrix.region }}
+
+    strategy:
+      matrix:
+        region: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run scanner
+        run: python scanner.py
+        env:
+          CONFIG_URL: ${{ secrets.CONFIG_URL }}
+          PCLOUD_USERNAME: ${{ secrets.PCLOUD_USERNAME }}
+          PCLOUD_PASSWORD: ${{ secrets.PCLOUD_PASSWORD }}
+          
