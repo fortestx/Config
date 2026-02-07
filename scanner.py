@@ -6,28 +6,27 @@ import base64
 import json
 import re
 
-# UTF-8 ayarı
 sys.stdout.reconfigure(encoding='utf-8')
 
-# Ayarlar
+# Ayarlar - GitHub Secrets'tan alınır
 CONFIG_URL = os.getenv("CONFIG_URL")
 PCLOUD_AUTH = os.getenv("PCLOUD_AUTH")
 API_BASE = "https://eapi.pcloud.com"
 
-MAX_CONFIG = 2000 # 2000 bulunca durur
+MAX_CONFIG = 2000
 TIMEOUT = 4
-CONCURRENT = 400 # 10.000 config için hızı artırdık
+CONCURRENT = 350
 
 # Ülke Bayrak Sözlüğü
 FLAGS = {
     "TR": "🇹🇷", "US": "🇺🇸", "DE": "🇩🇪", "GB": "🇬🇧", "FR": "🇫🇷", 
-    "NL": "🇳🇱", "SG": "🇸🇬", "JP": "🇯🇵", "CA": "🇨🇦", "HK": "🇭🇰"
+    "NL": "🇳🇱", "SG": "🇸🇬", "JP": "🇯🇵", "CA": "🇨🇦", "HK": "🇭🇰",
+    "IT": "🇮🇹", "ES": "🇪🇸", "RU": "🇷🇺", "KR": "🇰🇷", "BR": "🇧🇷"
 }
+
 rename_counter = {}
 working_list = []
-stop_event = asyncio.Event()
 
-# ---------------- PARSERS ---------------- #
 def parse_host_port(config):
     try:
         if config.startswith(("vless://", "trojan://")):
@@ -44,29 +43,35 @@ def parse_host_port(config):
     except: pass
     return None, None
 
-# ---------------- GEOIP & RENAME ---------------- #
 async def get_country_and_rename(session, config, host):
-    proto = config.split("://")[0].upper()
+    # Protokolü al (vless, vmess vb.)
+    proto = config.split("://")[0].lower()
+    cc = "UN" # Bilinmeyen ülke için
+    
     try:
-        async with session.get(f"http://ip-api.com/json/{host}?fields=status,countryCode", timeout=3) as resp:
+        async with session.get(f"http://ip-api.com/json/{host}?fields=status,countryCode", timeout=2) as resp:
             data = await resp.json()
-            cc = data.get("countryCode", "UN") if data.get("status") == "success" else "UN"
-    except:
-        cc = "UN"
+            if data.get("status") == "success":
+                cc = data.get("countryCode", "UN")
+    except: pass
     
     flag = FLAGS.get(cc, "🌐")
+    # Her ülke için ayrı sayaç tut
     rename_counter[cc] = rename_counter.get(cc, 0) + 1
-    name = f"{flag} {cc}{rename_counter[cc]}-{proto.lower()}"
     
-    clean_conf = config.split("#")[0]
-    return f"{clean_conf}#{name}"
+    # FORMAT: 🇩🇪 DE1-vless
+    new_name = f"{flag} {cc}{rename_counter[cc]}-{proto}"
+    
+    # Eski ismi (varsa # işaretinden sonrasını) tamamen SİL ve yeni ismi ekle
+    base_config = config.split("#")[0]
+    return f"{base_config}#{new_name}"
 
-# ---------------- SCANNER ---------------- #
 async def check_config(session, semaphore, config):
-    if stop_event.is_set(): return
+    if len(working_list) >= MAX_CONFIG:
+        return None
 
     host, port = parse_host_port(config)
-    if not host: return
+    if not host: return None
 
     async with semaphore:
         try:
@@ -75,21 +80,20 @@ async def check_config(session, semaphore, config):
             writer.close()
             await writer.wait_closed()
             
-            # Çalışıyorsa isimlendir ve listeye ekle
-            final_config = await get_country_and_rename(session, config, host)
-            working_list.append(final_config)
-            
-            print(f"BULDUM [{len(working_list)}]: {host}")
-            
-            if len(working_list) >= MAX_CONFIG:
-                stop_event.set()
-        except: pass
+            # Çalışıyorsa isimlendirmeyi yap
+            renamed = await get_country_and_rename(session, config, host)
+            return renamed
+        except:
+            return None
 
-# ---------------- PCLOUD ---------------- #
 async def pcloud_upload(content):
+    if not PCLOUD_AUTH:
+        print("[!] Hata: PCLOUD_AUTH boş, yükleme yapılamaz.")
+        return
+
     url = f"{API_BASE}/uploadfile"
     data = aiohttp.FormData()
-    data.add_field('auth', PCLOUD_AUTH)
+    data.add_field('auth', str(PCLOUD_AUTH)) # NoneType hatasını önlemek için str() ekledik
     data.add_field('path', '/')
     data.add_field('filename', 'working_configs.txt')
     data.add_field('nopartial', '1')
@@ -98,24 +102,40 @@ async def pcloud_upload(content):
     async with aiohttp.ClientSession() as session:
         async with session.post(url, data=data) as resp:
             res = await resp.json()
-            print("YUKLEME:", "OK" if res.get("result") == 0 else f"HATA: {res}")
+            if res.get("result") == 0:
+                print(f"[+] Başarılı: 2000 config pCloud'a yüklendi.")
+            else:
+                print(f"[!] pCloud Hatası: {res}")
 
-# ---------------- MAIN ---------------- #
 async def main():
+    if not CONFIG_URL or not PCLOUD_AUTH:
+        print("[!] HATA: Secrets (CONFIG_URL veya PCLOUD_AUTH) eksik!")
+        return
+
     async with aiohttp.ClientSession() as session:
-        print("Kaynaklar indiriliyor...")
+        print("[-] Configler çekiliyor...")
         async with session.get(CONFIG_URL) as resp:
-            configs = list(set((await resp.text()).splitlines()))
+            raw_data = await resp.text()
+            configs = list(set(raw_data.splitlines()))
         
-        print(f"Tarama basladi (Hedef: {MAX_CONFIG} canlı config)...")
+        print(f"[-] Tarama başladı... (Hedef: {MAX_CONFIG})")
         semaphore = asyncio.Semaphore(CONCURRENT)
         tasks = [check_config(session, semaphore, c) for c in configs]
         
-        await asyncio.gather(*tasks)
-        
+        for task in asyncio.as_completed(tasks):
+            if len(working_list) >= MAX_CONFIG:
+                break
+            
+            result = await task
+            if result:
+                working_list.append(result)
+                if len(working_list) % 50 == 0:
+                    print(f"İlerleme: {len(working_list)} canlı bulundu.")
+
         if working_list:
-            print(f"Toplam {len(working_list)} config yukleniyor.")
             await pcloud_upload("\n".join(working_list))
+        else:
+            print("[!] Çalışan config bulunamadı.")
 
 if __name__ == "__main__":
     asyncio.run(main())
