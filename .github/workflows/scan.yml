@@ -27,6 +27,7 @@ jobs:
         run: python scanner.py
         env:
           CONFIG_URL: ${{ secrets.CONFIG_URL }}
+          PCLOUD_AUTH: ${{ secrets.PCLOUD_AUTH }}
           PCLOUD_USERNAME: ${{ secrets.PCLOUD_USERNAME }}
           PCLOUD_PASSWORD: ${{ secrets.PCLOUD_PASSWORD }}
           
