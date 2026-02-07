@@ -3,6 +3,8 @@ import asyncio
 import aiohttp
 import socket
 import re
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
 
 CONFIG_URL = os.getenv("CONFIG_URL")
 
