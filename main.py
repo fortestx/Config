@@ -34,7 +34,6 @@ def parse_vmess(vmess_url):
 
 def parse_vless_trojan(url):
     try:
-        # vless://... @ip:port veya trojan://... @ip:port
         match = re.search(r"@([^:]+):(\d+)", url)
         if match: return match.group(1), int(match.group(2))
         return None, None
@@ -42,7 +41,6 @@ def parse_vless_trojan(url):
 
 def parse_ss(url):
     try:
-        # ss://base64@ip:port#tag formatı için
         if "@" in url:
             part = url.split("@")[1].split("#")[0]
             ip = part.split(":")[0]
@@ -54,7 +52,6 @@ def parse_ss(url):
 async def check_port(session, proxy, ip, port):
     if len(working_proxies) >= MAX_WORKING: return
     try:
-        # TCP Port kontrolü
         conn = asyncio.open_connection(ip, port)
         await asyncio.wait_for(conn, timeout=TIMEOUT)
         working_proxies.append(proxy)
@@ -68,64 +65,62 @@ async def fetch_and_scan():
             try:
                 async with session.get(source) as resp:
                     text = await resp.text()
-                    lines = text.splitlines()
-                    for line in lines:
+                    for line in text.splitlines():
                         line = line.strip()
-                        # SS desteği eklendi
                         if line.startswith(("vmess://", "vless://", "trojan://", "ss://")):
                             raw_configs.add(line)
             except: continue
 
         print(f"[-] {len(raw_configs)} benzersiz config bulundu. Hizli tarama basliyor...")
+        
         tasks = []
-        for config in raw_configs:
+        for config in list(raw_configs):
             if len(working_proxies) >= MAX_WORKING: break
             
             ip, port = None, None
-            if config.startswith("vmess://"):
-                ip, port = parse_vmess(config)
-            elif config.startswith("ss://"):
-                ip, port = parse_ss(config)
-            else: # vless veya trojan
-                ip, port = parse_vless_trojan(config)
+            if config.startswith("vmess://"): ip, port = parse_vmess(config)
+            elif config.startswith("ss://"): ip, port = parse_ss(config)
+            else: ip, port = parse_vless_trojan(config)
             
             if ip and port: 
                 tasks.append(check_port(session, config, ip, port))
         
-        # 100'erli gruplar halinde paralel tarama
-        for i in range(0, len(tasks), 100):
-            if len(working_proxies) >= MAX_WORKING: break
-            await asyncio.gather(*tasks[i:i+100])
+        # Hata düzeltildi: await eklendi
+        if tasks:
+            for i in range(0, len(tasks), 100):
+                if len(working_proxies) >= MAX_WORKING: break
+                await asyncio.gather(*tasks[i:i+100])
 
 async def upload_to_pcloud():
     if not working_proxies: 
-        print("[!] Yuklenecek calisan config bulunamadi.")
+        print("[!] Yuklenecek calisan config bulunamadi, portu acik olan yok.")
         return
         
-    content = "\n".join(working_proxies)
+    print(f"[-] {len(working_proxies)} adet config pCloud'a gonderiliyor...")
     async with aiohttp.ClientSession() as session:
-        # 1. Login
+        # pCloud Login
         login_url = f"https://api.pcloud.com/userinfo?getauth=1&logout=1&username={PCLOUD_USER}&password={PCLOUD_PASS}"
         async with session.get(login_url) as r:
             res_data = await r.json()
-            auth = res_data.get("auth")
-            if not auth: 
-                print("[!] pCloud Login hatasi! Kullanici adi veya sifreyi kontrol et.")
+            if res_data.get("result") != 0:
+                print(f"[!] pCloud Login hatasi! Mesaj: {res_data.get('error')}")
                 return
+            auth = res_data.get("auth")
 
-        # 2. Upload (Dosya varsa üzerine yazar)
+        # pCloud Upload
+        content = "\n".join(working_proxies)
         payload = aiohttp.FormData()
         payload.add_field('auth', auth)
         payload.add_field('path', '/')
         payload.add_field('file', content.encode('utf-8'), filename=FILE_NAME)
         
         async with session.post("https://api.pcloud.com/uploadfile", data=payload) as up_r:
-            if up_r.status == 200: 
-                print(f"[+] BASARILI: {len(working_proxies)} config pCloud'a yuklendi.")
+            res_up = await up_r.json()
+            if up_r.status == 200 and res_up.get("result") == 0:
+                print(f"[+] TAMAMLANDI: {FILE_NAME} pCloud ana dizinine yuklendi.")
             else: 
-                print(f"[!] Yukleme sirasinda hata: {up_r.status}")
+                print(f"[!] Yukleme hatasi: {res_up}")
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(fetch_and_scan())
-    loop.run_until_complete(upload_to_pcloud())
+    asyncio.run(fetch_and_scan())
+    asyncio.run(upload_to_pcloud())
