@@ -100,7 +100,7 @@ async def main():
     
     # 2. pCloud'a yükle
     content = "\n".join(configs)
-    success = await pcloud_upload(content, "all_configs.txt")
+    success = await pcloud_upload(content, "working_configs.txt")
     
     if success:
         print("=" * 60)
