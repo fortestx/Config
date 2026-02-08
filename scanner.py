@@ -46,7 +46,7 @@ async def fetch_configs():
         print(f"[!] Hata: {e}")
         return None
 
-async def pcloud_upload(content, filename="all_configs.txt"):
+async def pcloud_upload(content, filename="working_configs.txt"):
     """pCloud'a dosya yükle"""
     if not PCLOUD_AUTH:
         print("[!] HATA: PCLOUD_AUTH tanımlanmamış!")
