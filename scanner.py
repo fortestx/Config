@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-GitHub Action Script - Basit Versiyon
-Link'ten config çeker ve doğrudan pCloud'a yükler
+GitHub Action Script - Multi-URL Versiyon
+Birden fazla link'ten config çeker ve hepsini pCloud'a yükler
 """
 
 import os
@@ -12,39 +12,75 @@ import aiohttp
 sys.stdout.reconfigure(encoding='utf-8')
 
 # Ayarlar - GitHub Secrets'tan alınır
-CONFIG_URL = os.getenv("CONFIG_URL")
+CONFIG_URLS = os.getenv("CONFIG_URLS")  # Virgülle ayrılmış URL listesi
 PCLOUD_AUTH = os.getenv("PCLOUD_AUTH")
 API_BASE = "https://eapi.pcloud.com"
 
-async def fetch_configs():
-    """Config URL'sinden tüm linkleri çek"""
-    if not CONFIG_URL:
-        print("[!] HATA: CONFIG_URL tanımlanmamış!")
-        return None
-    
+async def fetch_configs_from_url(session, url, url_index):
+    """Tek bir URL'den configleri çek"""
     try:
-        print(f"[-] Configler çekiliyor: {CONFIG_URL}")
-        async with aiohttp.ClientSession() as session:
-            async with session.get(CONFIG_URL, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                if resp.status != 200:
-                    print(f"[!] HTTP Hatası: {resp.status}")
-                    return None
-                
-                raw_data = await resp.text()
-                configs = [line.strip() for line in raw_data.splitlines() if line.strip() and "://" in line]
-                
-                # Duplikaları kaldır
-                configs = list(set(configs))
-                
-                print(f"[+] {len(configs)} benzersiz config bulundu")
-                return configs
+        print(f"[-] [{url_index}] URL çekiliyor: {url}")
+        
+        async with session.get(url.strip(), timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            if resp.status != 200:
+                print(f"[!] [{url_index}] HTTP Hatası: {resp.status}")
+                return []
+            
+            raw_data = await resp.text()
+            configs = [line.strip() for line in raw_data.splitlines() if line.strip() and "://" in line]
+            
+            print(f"[+] [{url_index}] {len(configs)} config bulundu")
+            return configs
     
     except asyncio.TimeoutError:
-        print("[!] Timeout: Bağlantı zaman aşımına uğradı")
-        return None
+        print(f"[!] [{url_index}] Timeout: {url}")
+        return []
     except Exception as e:
-        print(f"[!] Hata: {e}")
+        print(f"[!] [{url_index}] Hata: {e}")
+        return []
+
+async def fetch_all_configs():
+    """Tüm URL'lerden configleri çek"""
+    if not CONFIG_URLS:
+        print("[!] HATA: CONFIG_URLS tanımlanmamış!")
         return None
+    
+    # URL listesini ayır (virgül, noktalı virgül veya satır sonu ile)
+    url_list = []
+    for separator in [',', ';', '\n']:
+        if separator in CONFIG_URLS:
+            url_list = [u.strip() for u in CONFIG_URLS.split(separator) if u.strip()]
+            break
+    
+    # Eğer ayırıcı yoksa tek URL olarak kabul et
+    if not url_list:
+        url_list = [CONFIG_URLS.strip()]
+    
+    print("=" * 60)
+    print(f"📋 Toplam {len(url_list)} URL bulundu")
+    print("=" * 60)
+    
+    all_configs = []
+    
+    async with aiohttp.ClientSession() as session:
+        # Tüm URL'leri paralel olarak çek
+        tasks = [fetch_configs_from_url(session, url, i+1) for i, url in enumerate(url_list)]
+        results = await asyncio.gather(*tasks)
+        
+        # Tüm sonuçları birleştir
+        for configs in results:
+            all_configs.extend(configs)
+    
+    # Duplikaları kaldır
+    unique_configs = list(set(all_configs))
+    
+    print("=" * 60)
+    print(f"[+] Toplam: {len(all_configs)} config")
+    print(f"[+] Benzersiz: {len(unique_configs)} config")
+    print(f"[+] Duplikat: {len(all_configs) - len(unique_configs)} config temizlendi")
+    print("=" * 60)
+    
+    return unique_configs
 
 async def pcloud_upload(content, filename="working_configs.txt"):
     """pCloud'a dosya yükle"""
@@ -70,6 +106,7 @@ async def pcloud_upload(content, filename="working_configs.txt"):
                 
                 if res.get("result") == 0:
                     print(f"[+] ✅ Başarılı: {filename} pCloud'a yüklendi")
+                    print(f"[+] 📊 Dosya boyutu: {len(content)} byte")
                     return True
                 else:
                     print(f"[!] ❌ pCloud Hatası: {res.get('error', 'Bilinmeyen hata')}")
@@ -82,20 +119,27 @@ async def pcloud_upload(content, filename="working_configs.txt"):
 async def main():
     """Ana program akışı"""
     print("=" * 60)
-    print("GitHub Action - Config Uploader")
+    print("GitHub Action - Multi-URL Config Uploader")
     print("=" * 60)
     
     # Environment variables kontrolü
-    if not CONFIG_URL or not PCLOUD_AUTH:
-        print("[!] HATA: CONFIG_URL veya PCLOUD_AUTH secrets eksik!")
+    if not CONFIG_URLS or not PCLOUD_AUTH:
+        print("[!] HATA: CONFIG_URLS veya PCLOUD_AUTH secrets eksik!")
         print("    GitHub > Settings > Secrets and variables > Actions")
+        print("")
+        print("CONFIG_URLS formatı:")
+        print("  Tek URL: https://example.com/configs.txt")
+        print("  Çoklu URL (virgül): https://url1.com,https://url2.com,https://url3.com")
+        print("  Çoklu URL (satır): ")
+        print("    https://url1.com")
+        print("    https://url2.com")
         sys.exit(1)
     
-    # 1. Configleri çek
-    configs = await fetch_configs()
+    # 1. Tüm URL'lerden configleri çek
+    configs = await fetch_all_configs()
     
     if not configs:
-        print("[!] Config bulunamadı veya çekilemedi")
+        print("[!] Hiçbir config bulunamadı veya çekilemedi")
         sys.exit(1)
     
     # 2. pCloud'a yükle
@@ -104,11 +148,11 @@ async def main():
     
     if success:
         print("=" * 60)
-        print(f"[+] İşlem tamamlandı: {len(configs)} config yüklendi")
+        print(f"[+] ✅ İşlem tamamlandı: {len(configs)} config yüklendi")
         print("=" * 60)
         sys.exit(0)
     else:
-        print("[!] Yükleme başarısız!")
+        print("[!] ❌ Yükleme başarısız!")
         sys.exit(1)
 
 if __name__ == "__main__":
