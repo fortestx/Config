@@ -24,8 +24,8 @@ YANDEX_OUTPUT_FILE = os.getenv("YANDEX_OUTPUT_FILE", "/working_configs.txt")  # 
 YANDEX_API_BASE = "https://cloud-api.yandex.net/v1/disk"
 MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", "5"))
 ENABLE_RENAME = os.getenv("ENABLE_RENAME", "true").lower() == "true"  # İsimlendirme aktif mi
-GEOIP_TIMEOUT = int(os.getenv("GEOIP_TIMEOUT", "8"))  # GeoIP timeout
-GEOIP_MAX_RETRIES = int(os.getenv("GEOIP_MAX_RETRIES", "2"))  # GeoIP retry sayısı
+GEOIP_TIMEOUT = int(os.getenv("GEOIP_TIMEOUT", "0.01"))  # GeoIP timeout
+GEOIP_MAX_RETRIES = int(os.getenv("GEOIP_MAX_RETRIES", "1"))  # GeoIP retry sayısı
 
 # GeoIP Veritabanını Yükle (Global)
 # GitHub Actions workflow ile indirilen 'GeoLite2-Country.mmdb' dosyasını arar.
