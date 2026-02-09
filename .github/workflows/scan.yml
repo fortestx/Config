@@ -26,15 +26,6 @@ jobs:
       - name: Debug – list files
         run: ls -R
 
-      - name: Download GeoIP Database
-        run: |
-          wget -q https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-Country.mmdb -O GeoLite2-Country.mmdb
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install aiohttp geoip2
-
       - name: Run scanner
         env:
           CONFIG_URLS: ${{ secrets.CONFIG_URLS }}
