@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 GitHub Action Script - Multi-URL to Yandex Disk with Renaming
-Birden fazla link'ten config çeker, önce yerel GeoIP veritabanından,
-bulamazsa API'den ülke kodunu alır ve Yandex Disk'e yükler.
+Birden fazla link'ten config çeker, ülke koduna göre isimlendirir ve Yandex Disk'e yükler
 """
 
 import os
@@ -12,8 +11,6 @@ import aiohttp
 import re
 import json
 import base64
-import random
-import geoip2.database  # EKLENDİ: Veritabanı kütüphanesi
 
 sys.stdout.reconfigure(encoding='utf-8')
 
@@ -24,24 +21,8 @@ YANDEX_OUTPUT_FILE = os.getenv("YANDEX_OUTPUT_FILE", "/working_configs.txt")  # 
 YANDEX_API_BASE = "https://cloud-api.yandex.net/v1/disk"
 MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", "5"))
 ENABLE_RENAME = os.getenv("ENABLE_RENAME", "true").lower() == "true"  # İsimlendirme aktif mi
-GEOIP_TIMEOUT = int(os.getenv("GEOIP_TIMEOUT", "1"))  # GeoIP timeout
-GEOIP_MAX_RETRIES = int(os.getenv("GEOIP_MAX_RETRIES", "1"))  # GeoIP retry sayısı
-
-# GeoIP Veritabanını Yükle (Global)
-# GitHub Actions workflow ile indirilen 'GeoLite2-Country.mmdb' dosyasını arar.
-DB_PATH = "GeoLite2-Country.mmdb"
-geo_reader = None
-
-try:
-    geo_reader = geoip2.database.Reader(DB_PATH)
-    print(f"[+] GeoIP Veritabanı yüklendi: {DB_PATH}")
-except FileNotFoundError:
-    print(f"[!] UYARI: {DB_PATH} bulunamadı! Sadece API kullanılacak.")
-except Exception as e:
-    print(f"[!] Veritabanı hatası: {e}. Sadece API kullanılacak.")
-
-# API için Eş Zamanlı İstek Sınırlayıcı
-geoip_sem = asyncio.Semaphore(5) 
+GEOIP_TIMEOUT = int(os.getenv("GEOIP_TIMEOUT", "8"))  # GeoIP timeout
+GEOIP_MAX_RETRIES = int(os.getenv("GEOIP_MAX_RETRIES", "2"))  # GeoIP retry sayısı
 
 # Ülke Kodu Dönüşüm Tablosu (2 harfli → 3 harfli)
 COUNTRY_CODE_MAP = {
@@ -117,67 +98,33 @@ def extract_host_from_link(link):
     return None
 
 async def get_country_code(session, host, retry=0):
-    """Host için ülke kodu al - ÖNCE VERİTABANI, SONRA API"""
+    """Host için ülke kodu al - RETRY MEKANİZMASI İLE"""
     if not host:
         return "UN"
-
-    # --- 1. AŞAMA: OFFLINE VERİTABANI KONTROLÜ ---
-    if geo_reader:
-        try:
-            # geoip2 sadece IP adreslerini kabul eder. 
-            # Eğer host bir domain ise (örn: google.com) hata verir, API'ye düşeriz.
-            response = geo_reader.country(host)
-            cc = response.country.iso_code
-            if cc:
-                # print(f"[+] GeoIP (DB): {host} → {cc}")
-                return cc
-        except (ValueError, geoip2.errors.AddressNotFoundError):
-            # Host IP değilse veya DB'de yoksa sessizce geç
-            pass
-        except Exception:
-            pass
-
-    # --- 2. AŞAMA: ONLINE API KONTROLÜ (Yedek Plan) ---
-    # Eğer veritabanında bulunamadıysa buraya düşer.
     
-    # API'nin banlamaması için rastgele küçük bir gecikme
-    await asyncio.sleep(random.uniform(0.1, 0.5))
-
     try:
-        async with geoip_sem:
-            async with session.get(
-                f"http://ip-api.com/json/{host}?fields=status,countryCode",
-                timeout=aiohttp.ClientTimeout(total=GEOIP_TIMEOUT)
-            ) as resp:
-                
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get("status") == "success":
-                        cc = data.get("countryCode", "UN")
-                        if cc != "UN":
-                            print(f"[+] GeoIP (API): {host} → {cc}")
-                        return cc
-                    return "UN"
-
-                elif resp.status == 429: # Rate Limit
-                    if retry < GEOIP_MAX_RETRIES:
-                        wait_time = (retry + 2) * 2
-                        print(f"[!] API LİMİTİ (429): {host} için {wait_time}sn bekleniyor...")
-                        await asyncio.sleep(wait_time)
-                        return await get_country_code(session, host, retry + 1)
-
-                else:
-                    if retry < GEOIP_MAX_RETRIES:
-                        await asyncio.sleep(1)
-                        return await get_country_code(session, host, retry + 1)
-
-    except (asyncio.TimeoutError, aiohttp.ClientError):
+        async with session.get(
+            f"http://ip-api.com/json/{host}?fields=status,countryCode",
+            timeout=aiohttp.ClientTimeout(total=GEOIP_TIMEOUT)
+        ) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data.get("status") == "success":
+                    cc = data.get("countryCode", "UN")
+                    if cc != "UN":
+                        print(f"[+] GeoIP: {host} → {cc}")
+                    return cc
+                elif retry < GEOIP_MAX_RETRIES:
+                    print(f"[!] GeoIP retry {retry+1}/{GEOIP_MAX_RETRIES}: {host}")
+                    await asyncio.sleep(1)
+                    return await get_country_code(session, host, retry + 1)
+    except asyncio.TimeoutError:
         if retry < GEOIP_MAX_RETRIES:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
             return await get_country_code(session, host, retry + 1)
     except Exception:
         pass
-
+    
     return "UN"
 
 async def rename_config(session, link):
@@ -215,7 +162,7 @@ async def rename_config(session, link):
 ##################################################
 
 def parse_urls(raw_urls):
-    """URL listesini parse et"""
+    """URL listesini çok akıllı bir şekilde parse et"""
     if not raw_urls:
         return []
     
@@ -237,6 +184,7 @@ def parse_urls(raw_urls):
             if line.startswith('http://') or line.startswith('https://'):
                 urls.append(line)
     
+    # Duplikaları temizle
     seen = set()
     unique_urls = []
     for url in urls:
@@ -352,6 +300,7 @@ async def rename_all_configs(configs):
     
     connector = aiohttp.TCPConnector(limit=10, limit_per_host=3)
     async with aiohttp.ClientSession(connector=connector) as session:
+        # Batch processing - her seferinde 20 config
         batch_size = 20
         renamed_configs = []
         
@@ -362,9 +311,9 @@ async def rename_all_configs(configs):
             batch_renamed = await asyncio.gather(*[rename_config(session, link) for link in batch])
             renamed_configs.extend(batch_renamed)
             
-            # Rate limit için ufak bir bekleme (veritabanı varsa çok şart değil ama güvenli)
+            # Rate limit koruması
             if i + batch_size < len(configs):
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1)
     
     print("=" * 70)
     print("[+] ✅ İsimlendirme tamamlandı")
@@ -447,21 +396,24 @@ async def yandex_disk_upload(content):
 async def main():
     """Ana program akışı"""
     print("=" * 70)
-    print("🚀 GitHub Action - Multi-URL with Renaming (Hybrid GeoIP)")
+    print("🚀 GitHub Action - Multi-URL with Renaming")
     print("=" * 70)
     
     if not CONFIG_URLS or not YANDEX_TOKEN:
         print("[!] HATA: CONFIG_URLS veya YANDEX_TOKEN secrets eksik!")
         sys.exit(1)
     
+    # 1. Tüm URL'lerden configleri çek
     configs = await fetch_all_configs()
     
     if not configs:
         print("[!] ❌ Hiçbir config bulunamadı veya çekilemedi")
         sys.exit(1)
     
+    # 2. İsimlendirme (eğer aktifse)
     renamed_configs = await rename_all_configs(configs)
     
+    # 3. Yandex Disk'e yükle
     content = "\n".join(renamed_configs)
     success = await yandex_disk_upload(content)
     
