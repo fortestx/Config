@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-GitHub Action Script - Multi-URL Versiyon
-Birden fazla link'ten config çeker ve hepsini pCloud'a yükler
+GitHub Action Script - Multi-URL to Yandex Disk
+Birden fazla link'ten config çeker ve Yandex Disk'e yükler
 """
 
 import os
@@ -13,8 +13,9 @@ sys.stdout.reconfigure(encoding='utf-8')
 
 # Ayarlar - GitHub Secrets'tan alınır
 CONFIG_URLS = os.getenv("CONFIG_URLS")  # Virgülle ayrılmış URL listesi
-PCLOUD_AUTH = os.getenv("PCLOUD_AUTH")
-API_BASE = "https://eapi.pcloud.com"
+YANDEX_TOKEN = os.getenv("YANDEX_TOKEN")  # Yandex OAuth token
+YANDEX_OUTPUT_FILE = os.getenv("YANDEX_OUTPUT_FILE", "/working_configs.txt")  # Yandex Disk'teki dosya yolu
+YANDEX_API_BASE = "https://cloud-api.yandex.net/v1/disk"
 
 async def fetch_configs_from_url(session, url, url_index):
     """Tek bir URL'den configleri çek"""
@@ -82,34 +83,52 @@ async def fetch_all_configs():
     
     return unique_configs
 
-async def pcloud_upload(content, filename="working_configs.txt"):
-    """pCloud'a dosya yükle"""
-    if not PCLOUD_AUTH:
-        print("[!] HATA: PCLOUD_AUTH tanımlanmamış!")
+async def yandex_disk_upload(content):
+    """Yandex Disk'e dosya yükle"""
+    if not YANDEX_TOKEN:
+        print("[!] HATA: YANDEX_TOKEN tanımlanmamış!")
         return False
     
     try:
-        url = f"{API_BASE}/uploadfile"
-        data = aiohttp.FormData()
-        data.add_field('auth', str(PCLOUD_AUTH))
-        data.add_field('path', '/')
-        data.add_field('filename', filename)
-        data.add_field('nopartial', '1')
-        data.add_field('overwrite', '1')
-        data.add_field('file', content.encode('utf-8'), filename=filename)
-        
-        print(f"[-] pCloud'a yükleniyor: {filename}")
+        headers = {"Authorization": f"OAuth {YANDEX_TOKEN}"}
         
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=data, timeout=aiohttp.ClientTimeout(total=60)) as resp:
-                res = await resp.json()
+            # 1. Upload URL'ini al
+            print(f"[-] Yandex Disk'e yükleniyor: {YANDEX_OUTPUT_FILE}")
+            
+            async with session.get(
+                f"{YANDEX_API_BASE}/resources/upload",
+                params={"path": YANDEX_OUTPUT_FILE, "overwrite": "true"},
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as resp:
+                if resp.status != 200:
+                    print(f"[!] ❌ Yandex API hatası: {resp.status}")
+                    error_text = await resp.text()
+                    print(f"[!] Yanıt: {error_text}")
+                    return False
                 
-                if res.get("result") == 0:
-                    print(f"[+] ✅ Başarılı: {filename} pCloud'a yüklendi")
+                data = await resp.json()
+                upload_url = data.get("href")
+                
+                if not upload_url:
+                    print("[!] ❌ Upload URL alınamadı")
+                    return False
+            
+            # 2. Dosyayı yükle
+            async with session.put(
+                upload_url,
+                data=content.encode('utf-8'),
+                timeout=aiohttp.ClientTimeout(total=60)
+            ) as resp:
+                if resp.status in [201, 202]:
+                    print(f"[+] ✅ Başarılı: {YANDEX_OUTPUT_FILE} Yandex Disk'e yüklendi")
                     print(f"[+] 📊 Dosya boyutu: {len(content)} byte")
                     return True
                 else:
-                    print(f"[!] ❌ pCloud Hatası: {res.get('error', 'Bilinmeyen hata')}")
+                    print(f"[!] ❌ Yandex upload hatası: {resp.status}")
+                    error_text = await resp.text()
+                    print(f"[!] Yanıt: {error_text}")
                     return False
     
     except Exception as e:
@@ -119,20 +138,21 @@ async def pcloud_upload(content, filename="working_configs.txt"):
 async def main():
     """Ana program akışı"""
     print("=" * 60)
-    print("GitHub Action - Multi-URL Config Uploader")
+    print("GitHub Action - Multi-URL to Yandex Disk")
     print("=" * 60)
     
     # Environment variables kontrolü
-    if not CONFIG_URLS or not PCLOUD_AUTH:
-        print("[!] HATA: CONFIG_URLS veya PCLOUD_AUTH secrets eksik!")
+    if not CONFIG_URLS or not YANDEX_TOKEN:
+        print("[!] HATA: CONFIG_URLS veya YANDEX_TOKEN secrets eksik!")
         print("    GitHub > Settings > Secrets and variables > Actions")
         print("")
         print("CONFIG_URLS formatı:")
         print("  Tek URL: https://example.com/configs.txt")
         print("  Çoklu URL (virgül): https://url1.com,https://url2.com,https://url3.com")
-        print("  Çoklu URL (satır): ")
-        print("    https://url1.com")
-        print("    https://url2.com")
+        print("")
+        print("YANDEX_TOKEN:")
+        print("  Yandex OAuth token gerekli")
+        print("  https://oauth.yandex.com/authorize?response_type=token&client_id=YOUR_APP_ID")
         sys.exit(1)
     
     # 1. Tüm URL'lerden configleri çek
@@ -142,9 +162,9 @@ async def main():
         print("[!] Hiçbir config bulunamadı veya çekilemedi")
         sys.exit(1)
     
-    # 2. pCloud'a yükle
+    # 2. Yandex Disk'e yükle
     content = "\n".join(configs)
-    success = await pcloud_upload(content, "working_configs.txt")
+    success = await yandex_disk_upload(content)
     
     if success:
         print("=" * 60)
