@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-GitHub Action Script - Multi-URL to Yandex Disk (FIXED)
-Birden fazla link'ten config çeker ve Yandex Disk'e yükler
+GitHub Action Script - Multi-URL to Yandex Disk with Renaming
+Birden fazla link'ten config çeker, ülke koduna göre isimlendirir ve Yandex Disk'e yükler
 """
 
 import os
@@ -9,6 +9,8 @@ import sys
 import asyncio
 import aiohttp
 import re
+import json
+import base64
 
 sys.stdout.reconfigure(encoding='utf-8')
 
@@ -17,38 +19,172 @@ CONFIG_URLS = os.getenv("CONFIG_URLS")  # Virgülle ayrılmış URL listesi
 YANDEX_TOKEN = os.getenv("YANDEX_TOKEN")  # Yandex OAuth token
 YANDEX_OUTPUT_FILE = os.getenv("YANDEX_OUTPUT_FILE", "/working_configs.txt")  # Yandex Disk'teki dosya yolu
 YANDEX_API_BASE = "https://cloud-api.yandex.net/v1/disk"
-MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", "5"))  # Aynı anda kaç URL çekilsin
+MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", "5"))
+ENABLE_RENAME = os.getenv("ENABLE_RENAME", "true").lower() == "true"  # İsimlendirme aktif mi
+GEOIP_TIMEOUT = int(os.getenv("GEOIP_TIMEOUT", "2"))  # GeoIP timeout
+GEOIP_MAX_RETRIES = int(os.getenv("GEOIP_MAX_RETRIES", "1"))  # GeoIP retry sayısı
+
+# Ülke Kodu Dönüşüm Tablosu (2 harfli → 3 harfli)
+COUNTRY_CODE_MAP = {
+    "TR": "TUR", "US": "USA", "DE": "GER", "GB": "GBR", "FR": "FRA",
+    "NL": "NLD", "SG": "SGP", "JP": "JPN", "CA": "CAN", "HK": "HKG",
+    "IT": "ITA", "ES": "ESP", "RU": "RUS", "KR": "KOR", "BR": "BRA",
+    "AU": "AUS", "IN": "IND", "SE": "SWE", "CH": "CHE", "PL": "POL",
+    "FI": "FIN", "NO": "NOR", "DK": "DNK", "AT": "AUT", "BE": "BEL",
+    "CZ": "CZE", "IE": "IRL", "PT": "PRT", "GR": "GRC", "RO": "ROU",
+    "CN": "CHN", "TW": "TWN", "MX": "MEX", "AR": "ARG", "CL": "CHL",
+    "ZA": "ZAF", "EG": "EGY", "IL": "ISR", "SA": "SAU", "AE": "ARE",
+    "TH": "THA", "VN": "VNM", "ID": "IDN", "MY": "MYS", "PH": "PHL",
+    "NZ": "NZL", "UA": "UKR", "HU": "HU", "SK": "SVK", "BG": "BGR"
+}
+
+# Ülke Bayrak Sözlüğü
+FLAGS = {
+    "TR": "🇹🇷", "US": "🇺🇸", "DE": "🇩🇪", "GB": "🇬🇧", "FR": "🇫🇷", 
+    "NL": "🇳🇱", "SG": "🇸🇬", "JP": "🇯🇵", "CA": "🇨🇦", "HK": "🇭🇰",
+    "IT": "🇮🇹", "ES": "🇪🇸", "RU": "🇷🇺", "KR": "🇰🇷", "BR": "🇧🇷",
+    "AU": "🇦🇺", "IN": "🇮🇳", "SE": "🇸🇪", "CH": "🇨🇭", "PL": "🇵🇱",
+    "FI": "🇫🇮", "NO": "🇳🇴", "DK": "🇩🇰", "AT": "🇦🇹", "BE": "🇧🇪",
+    "CZ": "🇨🇿", "IE": "🇮🇪", "PT": "🇵🇹", "GR": "🇬🇷", "RO": "🇷🇴",
+    "CN": "🇨🇳", "TW": "🇹🇼", "MX": "🇲🇽", "AR": "🇦🇷", "CL": "🇨🇱",
+    "ZA": "🇿🇦", "EG": "🇪🇬", "IL": "🇮🇱", "SA": "🇸🇦", "AE": "🇦🇪",
+    "TH": "🇹🇭", "VN": "🇻🇳", "ID": "🇮🇩", "MY": "🇲🇾", "PH": "🇵🇭",
+    "NZ": "🇳🇿", "UA": "🇺🇦", "HU": "🇭🇺", "SK": "🇸🇰", "BG": "🇧🇬"
+}
+
+# İsim sayaçları
+rename_counter = {}
+
+##################################################
+# İSİMLENDİRME FONKSİYONLARI
+##################################################
+
+def safe_b64_decode(s):
+    """Base64 decode işlemi - hata toleranslı"""
+    try:
+        s = s.strip().replace("-", "+").replace("_", "/")
+        padding = len(s) % 4
+        if padding:
+            s += "=" * (4 - padding)
+        return base64.b64decode(s).decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+def extract_host_from_link(link):
+    """Link'ten host bilgisini çıkarır"""
+    try:
+        if link.startswith(("vless://", "trojan://")):
+            match = re.search(r'@([^:]+):(\d+)', link)
+            if match:
+                return match.group(1)
+        elif link.startswith("vmess://"):
+            data = json.loads(safe_b64_decode(link.replace("vmess://", "")))
+            return data.get("add")
+        elif link.startswith("ss://"):
+            content = link.replace("ss://", "")
+            if "@" in content:
+                decoded = safe_b64_decode(content.split("@")[0])
+                if decoded and "@" in content:
+                    match = re.search(r'@([^:]+):(\d+)', content)
+                    if match:
+                        return match.group(1)
+            else:
+                decoded = safe_b64_decode(content)
+                match = re.search(r'@([^:]+):(\d+)', decoded)
+                if match:
+                    return match.group(1)
+    except:
+        pass
+    return None
+
+async def get_country_code(session, host, retry=0):
+    """Host için ülke kodu al - RETRY MEKANİZMASI İLE"""
+    if not host:
+        return "UN"
+    
+    try:
+        async with session.get(
+            f"http://ip-api.com/json/{host}?fields=status,countryCode",
+            timeout=aiohttp.ClientTimeout(total=GEOIP_TIMEOUT)
+        ) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data.get("status") == "success":
+                    cc = data.get("countryCode", "UN")
+                    if cc != "UN":
+                        print(f"[+] GeoIP: {host} → {cc}")
+                    return cc
+                elif retry < GEOIP_MAX_RETRIES:
+                    print(f"[!] GeoIP retry {retry+1}/{GEOIP_MAX_RETRIES}: {host}")
+                    await asyncio.sleep(1)
+                    return await get_country_code(session, host, retry + 1)
+    except asyncio.TimeoutError:
+        if retry < GEOIP_MAX_RETRIES:
+            await asyncio.sleep(0.5)
+            return await get_country_code(session, host, retry + 1)
+    except Exception:
+        pass
+    
+    return "UN"
+
+async def rename_config(session, link):
+    """Config linkini ülke koduna göre yeniden isimlendir"""
+    if not ENABLE_RENAME:
+        return link
+    
+    host = extract_host_from_link(link)
+    if not host:
+        return link
+    
+    proto = link.split("://")[0].lower()
+    
+    # Ülke kodunu al
+    cc_2letter = await get_country_code(session, host)
+    
+    # 3 harfli koda çevir
+    cc_3letter = COUNTRY_CODE_MAP.get(cc_2letter, "UNK")
+    
+    # Bayrak al
+    flag = FLAGS.get(cc_2letter, "🌐")
+    
+    # Sayaç
+    if cc_3letter not in rename_counter:
+        rename_counter[cc_3letter] = 0
+    rename_counter[cc_3letter] += 1
+    
+    new_name = f"{flag} {cc_3letter}{rename_counter[cc_3letter]}-{proto}"
+    base_config = link.split("#")[0]
+    
+    return f"{base_config}#{new_name}"
+
+##################################################
+# URL FETCHING
+##################################################
 
 def parse_urls(raw_urls):
     """URL listesini çok akıllı bir şekilde parse et"""
     if not raw_urls:
         return []
     
-    # Tüm olası ayırıcıları destekle
     urls = []
-    
-    # Önce satır satır ayır
     lines = raw_urls.strip().split('\n')
     
     for line in lines:
         line = line.strip()
-        if not line or line.startswith('#'):  # Boş satır veya yorum
+        if not line or line.startswith('#'):
             continue
         
-        # Virgül veya noktalı virgül ile ayrılmış URL'ler
         if ',' in line or ';' in line:
-            # Her iki ayırıcıyı da destekle
             parts = re.split('[,;]', line)
             for part in parts:
                 url = part.strip()
                 if url and (url.startswith('http://') or url.startswith('https://')):
                     urls.append(url)
         else:
-            # Tek URL
             if line.startswith('http://') or line.startswith('https://'):
                 urls.append(line)
     
-    # Duplikaları temizle ama sırayı koru
+    # Duplikaları temizle
     seen = set()
     unique_urls = []
     for url in urls:
@@ -72,27 +208,16 @@ async def fetch_configs_from_url(session, url, url_index, total_urls):
                 print(f"[!] [{url_index}/{total_urls}] ❌ HTTP Hatası {resp.status}: {url}")
                 return []
             
-            # Content-Type kontrolü (debugging için)
-            content_type = resp.headers.get('Content-Type', '')
-            print(f"[-] [{url_index}/{total_urls}] Content-Type: {content_type}")
-            
             raw_data = await resp.text()
             
-            # Config satırlarını bul (protocol:// içeren satırlar)
             configs = []
             for line in raw_data.splitlines():
                 line = line.strip()
                 if line and "://" in line:
-                    # Sadece bilinen protokolleri kabul et
                     if any(proto in line for proto in ['vless://', 'vmess://', 'trojan://', 'ss://', 'ssr://', 'hysteria://']):
                         configs.append(line)
             
             print(f"[+] [{url_index}/{total_urls}] ✅ {len(configs)} config bulundu")
-            
-            if len(configs) == 0:
-                print(f"[!] [{url_index}/{total_urls}] ⚠️ Hiç config bulunamadı - içerik ilk 200 karakter:")
-                print(f"    {raw_data[:200]}")
-            
             return configs
     
     except asyncio.TimeoutError:
@@ -111,12 +236,10 @@ async def fetch_all_configs():
         print("[!] HATA: CONFIG_URLS tanımlanmamış!")
         return None
     
-    # URL'leri parse et
     url_list = parse_urls(CONFIG_URLS)
     
     if not url_list:
         print("[!] HATA: Geçerli URL bulunamadı!")
-        print(f"[!] Girdi: {CONFIG_URLS[:200]}")
         return None
     
     print("=" * 70)
@@ -129,18 +252,14 @@ async def fetch_all_configs():
     print("=" * 70)
     
     all_configs = []
-    
-    # Connector ile connection pool ayarla
     connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT_REQUESTS, limit_per_host=2)
     
     async with aiohttp.ClientSession(connector=connector) as session:
-        # Tüm URL'leri paralel olarak çek (ama sınırlı sayıda)
         tasks = [
             fetch_configs_from_url(session, url, i+1, len(url_list)) 
             for i, url in enumerate(url_list)
         ]
         
-        # Semaphore ile eşzamanlı istek sayısını sınırla
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
         
         async def limited_fetch(task):
@@ -149,15 +268,13 @@ async def fetch_all_configs():
         
         results = await asyncio.gather(*[limited_fetch(task) for task in tasks], return_exceptions=True)
         
-        # Sonuçları topla ve hataları logla
         for i, result in enumerate(results, 1):
             if isinstance(result, Exception):
                 print(f"[!] [{i}/{len(url_list)}] ❌ Task hatası: {result}")
             elif isinstance(result, list):
                 all_configs.extend(result)
     
-    # Duplikaları kaldır (hem link olarak hem de normalize edilmiş haliyle)
-    unique_configs = list(dict.fromkeys(all_configs))  # Sırayı koruyarak duplike temizleme
+    unique_configs = list(dict.fromkeys(all_configs))
     
     print("=" * 70)
     print(f"[+] Toplam çekilen: {len(all_configs)} config")
@@ -167,6 +284,58 @@ async def fetch_all_configs():
     print("=" * 70)
     
     return unique_configs
+
+##################################################
+# İSİMLENDİRME VE YÜKLEME
+##################################################
+
+async def rename_all_configs(configs):
+    """Tüm configleri isimlendirme"""
+    if not ENABLE_RENAME or not configs:
+        return configs
+    
+    print("=" * 70)
+    print(f"🏷️ İsimlendirme başlatılıyor ({len(configs)} config)...")
+    print("=" * 70)
+    
+    connector = aiohttp.TCPConnector(limit=10, limit_per_host=3)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        # Batch processing - her seferinde 20 config
+        batch_size = 20
+        renamed_configs = []
+        
+        for i in range(0, len(configs), batch_size):
+            batch = configs[i:i+batch_size]
+            print(f"[-] İlerleme: {min(i+batch_size, len(configs))}/{len(configs)}")
+            
+            batch_renamed = await asyncio.gather(*[rename_config(session, link) for link in batch])
+            renamed_configs.extend(batch_renamed)
+            
+            # Rate limit koruması
+            if i + batch_size < len(configs):
+                await asyncio.sleep(1)
+    
+    print("=" * 70)
+    print("[+] ✅ İsimlendirme tamamlandı")
+    
+    # Ülke dağılımı
+    if rename_counter:
+        print("=" * 70)
+        print("🌍 ÜLKE DAĞILIMI:")
+        print("=" * 70)
+        sorted_countries = sorted(rename_counter.items(), key=lambda x: x[1], reverse=True)
+        for cc_3letter, count in sorted_countries[:15]:
+            cc_2letter = None
+            for key, val in COUNTRY_CODE_MAP.items():
+                if val == cc_3letter:
+                    cc_2letter = key
+                    break
+            
+            flag = FLAGS.get(cc_2letter, "🌐") if cc_2letter else "🌐"
+            print(f"  {flag} {cc_3letter}: {count} config")
+        print("=" * 70)
+    
+    return renamed_configs
 
 async def yandex_disk_upload(content):
     """Yandex Disk'e dosya yükle"""
@@ -178,7 +347,6 @@ async def yandex_disk_upload(content):
         headers = {"Authorization": f"OAuth {YANDEX_TOKEN}"}
         
         async with aiohttp.ClientSession() as session:
-            # 1. Upload URL'ini al
             print(f"[-] Yandex Disk'e yükleniyor: {YANDEX_OUTPUT_FILE}")
             
             async with session.get(
@@ -200,7 +368,6 @@ async def yandex_disk_upload(content):
                     print("[!] ❌ Upload URL alınamadı")
                     return False
             
-            # 2. Dosyayı yükle
             async with session.put(
                 upload_url,
                 data=content.encode('utf-8'),
@@ -222,38 +389,18 @@ async def yandex_disk_upload(content):
         traceback.print_exc()
         return False
 
+##################################################
+# MAIN
+##################################################
+
 async def main():
     """Ana program akışı"""
     print("=" * 70)
-    print("🚀 GitHub Action - Multi-URL to Yandex Disk (FIXED VERSION)")
+    print("🚀 GitHub Action - Multi-URL with Renaming")
     print("=" * 70)
     
-    # Environment variables kontrolü
     if not CONFIG_URLS or not YANDEX_TOKEN:
         print("[!] HATA: CONFIG_URLS veya YANDEX_TOKEN secrets eksik!")
-        print("")
-        print("GitHub > Settings > Secrets and variables > Actions")
-        print("")
-        print("📝 CONFIG_URLS formatı (desteklenen tüm formatlar):")
-        print("  • Tek URL:")
-        print("    https://example.com/configs.txt")
-        print("")
-        print("  • Virgülle ayrılmış:")
-        print("    https://url1.com,https://url2.com,https://url3.com")
-        print("")
-        print("  • Satır satır:")
-        print("    https://url1.com")
-        print("    https://url2.com")
-        print("    https://url3.com")
-        print("")
-        print("  • Karışık (yorum satırları desteklenir):")
-        print("    # Bu bir yorum")
-        print("    https://url1.com")
-        print("    https://url2.com,https://url3.com")
-        print("")
-        print("🔑 YANDEX_TOKEN:")
-        print("  Yandex OAuth token gerekli")
-        print("  https://oauth.yandex.com/authorize?response_type=token&client_id=YOUR_APP_ID")
         sys.exit(1)
     
     # 1. Tüm URL'lerden configleri çek
@@ -263,13 +410,16 @@ async def main():
         print("[!] ❌ Hiçbir config bulunamadı veya çekilemedi")
         sys.exit(1)
     
-    # 2. Yandex Disk'e yükle
-    content = "\n".join(configs)
+    # 2. İsimlendirme (eğer aktifse)
+    renamed_configs = await rename_all_configs(configs)
+    
+    # 3. Yandex Disk'e yükle
+    content = "\n".join(renamed_configs)
     success = await yandex_disk_upload(content)
     
     if success:
         print("=" * 70)
-        print(f"[+] ✅ İşlem tamamlandı: {len(configs)} config yüklendi")
+        print(f"[+] ✅ İşlem tamamlandı: {len(renamed_configs)} config yüklendi")
         print("=" * 70)
         sys.exit(0)
     else:
