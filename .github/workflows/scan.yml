@@ -3,7 +3,7 @@ name: VLESS Scanner
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */3 * * *"   # her 3 saat
+    - cron: "0 */6 * * *"   # her 6 saat
 
 jobs:
   scan:
