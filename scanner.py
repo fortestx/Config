@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-GitHub Action Script - Multi-URL to Yandex Disk with Renaming
-Birden fazla link'ten config çeker, önce yerel GeoIP veritabanından,
-bulamazsa API'den ülke kodunu alır ve Yandex Disk'e yükler.
+GitHub Action Script - Multi-URL to Yandex Disk with Local GeoIP & Deduplication
+- GeoIP database kullanarak rate limit yok
+- Akıllı duplicate detection (aynı server/port/uuid farklı isim)
+- Geliştirilmiş parser (ssr, hysteria desteği)
 """
 
 import os
@@ -12,38 +13,21 @@ import aiohttp
 import re
 import json
 import base64
-import random
-import geoip2.database  # EKLENDİ: Veritabanı kütüphanesi
+import hashlib
+import urllib.parse
 
 sys.stdout.reconfigure(encoding='utf-8')
 
-# Ayarlar - GitHub Secrets'tan alınır
-CONFIG_URLS = os.getenv("CONFIG_URLS")  # Virgülle ayrılmış URL listesi
-YANDEX_TOKEN = os.getenv("YANDEX_TOKEN")  # Yandex OAuth token
-YANDEX_OUTPUT_FILE = os.getenv("YANDEX_OUTPUT_FILE", "/working_configs.txt")  # Yandex Disk'teki dosya yolu
+# Ayarlar
+CONFIG_URLS = os.getenv("CONFIG_URLS")
+YANDEX_TOKEN = os.getenv("YANDEX_TOKEN")
+YANDEX_OUTPUT_FILE = os.getenv("YANDEX_OUTPUT_FILE", "/working_configs.txt")
 YANDEX_API_BASE = "https://cloud-api.yandex.net/v1/disk"
 MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", "5"))
-ENABLE_RENAME = os.getenv("ENABLE_RENAME", "true").lower() == "true"  # İsimlendirme aktif mi
-GEOIP_TIMEOUT = int(os.getenv("GEOIP_TIMEOUT", "2"))  # GeoIP timeout
-GEOIP_MAX_RETRIES = int(os.getenv("GEOIP_MAX_RETRIES", "1"))  # GeoIP retry sayısı
+ENABLE_RENAME = os.getenv("ENABLE_RENAME", "true").lower() == "true"
+GEOIP_DB_URL = "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-Country.mmdb"
 
-# GeoIP Veritabanını Yükle (Global)
-# GitHub Actions workflow ile indirilen 'GeoLite2-Country.mmdb' dosyasını arar.
-DB_PATH = "GeoLite2-Country.mmdb"
-geo_reader = None
-
-try:
-    geo_reader = geoip2.database.Reader(DB_PATH)
-    print(f"[+] GeoIP Veritabanı yüklendi: {DB_PATH}")
-except FileNotFoundError:
-    print(f"[!] UYARI: {DB_PATH} bulunamadı! Sadece API kullanılacak.")
-except Exception as e:
-    print(f"[!] Veritabanı hatası: {e}. Sadece API kullanılacak.")
-
-# API için Eş Zamanlı İstek Sınırlayıcı
-geoip_sem = asyncio.Semaphore(5) 
-
-# Ülke Kodu Dönüşüm Tablosu (2 harfli → 3 harfli)
+# Ülke Kodu Haritaları
 COUNTRY_CODE_MAP = {
     "TR": "TUR", "US": "USA", "DE": "GER", "GB": "GBR", "FR": "FRA",
     "NL": "NLD", "SG": "SGP", "JP": "JPN", "CA": "CAN", "HK": "HKG",
@@ -54,10 +38,9 @@ COUNTRY_CODE_MAP = {
     "CN": "CHN", "TW": "TWN", "MX": "MEX", "AR": "ARG", "CL": "CHL",
     "ZA": "ZAF", "EG": "EGY", "IL": "ISR", "SA": "SAU", "AE": "ARE",
     "TH": "THA", "VN": "VNM", "ID": "IDN", "MY": "MYS", "PH": "PHL",
-    "NZ": "NZL", "UA": "UKR", "HU": "HU", "SK": "SVK", "BG": "BGR"
+    "NZ": "NZL", "UA": "UKR", "HU": "HUN", "SK": "SVK", "BG": "BGR"
 }
 
-# Ülke Bayrak Sözlüğü
 FLAGS = {
     "TR": "🇹🇷", "US": "🇺🇸", "DE": "🇩🇪", "GB": "🇬🇧", "FR": "🇫🇷", 
     "NL": "🇳🇱", "SG": "🇸🇬", "JP": "🇯🇵", "CA": "🇨🇦", "HK": "🇭🇰",
@@ -71,117 +54,177 @@ FLAGS = {
     "NZ": "🇳🇿", "UA": "🇺🇦", "HU": "🇭🇺", "SK": "🇸🇰", "BG": "🇧🇬"
 }
 
-# İsim sayaçları
 rename_counter = {}
+geoip_reader = None
 
 ##################################################
-# İSİMLENDİRME FONKSİYONLARI
+# GEOIP DATABASE
+##################################################
+
+async def download_geoip_db():
+    """GeoIP database'i indir"""
+    global geoip_reader
+    
+    try:
+        print("[*] GeoIP database indiriliyor...")
+        
+        # geoip2 modülünü yükle
+        try:
+            import geoip2.database
+        except ImportError:
+            print("[!] geoip2 modülü yüklü değil, pip install yapılıyor...")
+            import subprocess
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "geoip2", "-q"])
+            import geoip2.database
+        
+        # Database'i indir
+        db_path = "/tmp/GeoLite2-Country.mmdb"
+        
+        if not os.path.exists(db_path):
+            async with aiohttp.ClientSession() as session:
+                async with session.get(GEOIP_DB_URL, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                    if resp.status == 200:
+                        with open(db_path, 'wb') as f:
+                            f.write(await resp.read())
+                        print(f"[+] GeoIP database indirildi: {db_path}")
+                    else:
+                        print(f"[!] GeoIP download hatası: {resp.status}")
+                        return False
+        else:
+            print(f"[+] GeoIP database mevcut: {db_path}")
+        
+        # Reader'ı aç
+        geoip_reader = geoip2.database.Reader(db_path)
+        print("[+] GeoIP database hazır!")
+        return True
+    
+    except Exception as e:
+        print(f"[!] GeoIP database hatası: {e}")
+        return False
+
+def get_country_from_ip(ip):
+    """IP'den ülke kodunu al (local database ile)"""
+    global geoip_reader
+    
+    if not geoip_reader:
+        return "UN"
+    
+    try:
+        response = geoip_reader.country(ip)
+        cc = response.country.iso_code
+        return cc if cc else "UN"
+    except:
+        return "UN"
+
+##################################################
+# GELİŞTİRİLMİŞ PARSER
 ##################################################
 
 def safe_b64_decode(s):
-    """Base64 decode işlemi - hata toleranslı"""
+    """Base64 decode - hata toleranslı"""
     try:
         s = s.strip().replace("-", "+").replace("_", "/")
         padding = len(s) % 4
         if padding:
             s += "=" * (4 - padding)
         return base64.b64decode(s).decode("utf-8", errors="ignore")
-    except Exception:
+    except:
         return ""
 
 def extract_host_from_link(link):
-    """Link'ten host bilgisini çıkarır"""
+    """Link'ten host bilgisini çıkar - GELİŞTİRİLMİŞ"""
     try:
+        # VLESS, Trojan
         if link.startswith(("vless://", "trojan://")):
-            match = re.search(r'@([^:]+):(\d+)', link)
+            match = re.search(r'@([^:/?]+)', link)
             if match:
                 return match.group(1)
+        
+        # VMess
         elif link.startswith("vmess://"):
             data = json.loads(safe_b64_decode(link.replace("vmess://", "")))
             return data.get("add")
+        
+        # Shadowsocks
         elif link.startswith("ss://"):
-            content = link.replace("ss://", "")
+            content = link.replace("ss://", "").split("#")[0]
+            
+            # Format 1: method:password@server:port
             if "@" in content:
-                decoded = safe_b64_decode(content.split("@")[0])
-                if decoded and "@" in content:
-                    match = re.search(r'@([^:]+):(\d+)', content)
-                    if match:
-                        return match.group(1)
-            else:
-                decoded = safe_b64_decode(content)
-                match = re.search(r'@([^:]+):(\d+)', decoded)
+                server_part = content.split("@")[1]
+                match = re.search(r'^([^:]+)', server_part)
                 if match:
                     return match.group(1)
+            
+            # Format 2: base64(method:password)@server:port
+            else:
+                decoded = safe_b64_decode(content)
+                if "@" in decoded:
+                    match = re.search(r'@([^:]+)', decoded)
+                    if match:
+                        return match.group(1)
+        
+        # SSR
+        elif link.startswith("ssr://"):
+            decoded = safe_b64_decode(link.replace("ssr://", ""))
+            match = re.search(r'^([^:]+)', decoded)
+            if match:
+                return match.group(1)
+        
+        # Hysteria
+        elif link.startswith("hysteria://"):
+            parsed = urllib.parse.urlparse(link)
+            return parsed.hostname
+        
     except:
         pass
+    
     return None
 
-async def get_country_code(session, host, retry=0):
-    """Host için ülke kodu al - ÖNCE VERİTABANI, SONRA API"""
-    if not host:
-        return "UN"
-
-    # --- 1. AŞAMA: OFFLINE VERİTABANI KONTROLÜ ---
-    if geo_reader:
-        try:
-            # geoip2 sadece IP adreslerini kabul eder. 
-            # Eğer host bir domain ise (örn: google.com) hata verir, API'ye düşeriz.
-            response = geo_reader.country(host)
-            cc = response.country.iso_code
-            if cc:
-                # print(f"[+] GeoIP (DB): {host} → {cc}")
-                return cc
-        except (ValueError, geoip2.errors.AddressNotFoundError):
-            # Host IP değilse veya DB'de yoksa sessizce geç
-            pass
-        except Exception:
-            pass
-
-    # --- 2. AŞAMA: ONLINE API KONTROLÜ (Yedek Plan) ---
-    # Eğer veritabanında bulunamadıysa buraya düşer.
-    
-    # API'nin banlamaması için rastgele küçük bir gecikme
-    await asyncio.sleep(random.uniform(0.1, 0.5))
-
+def generate_config_hash(link):
+    """
+    Config'in benzersiz hash'ini oluştur (duplicate detection için)
+    Host, port, uuid/password kombinasyonuna göre
+    """
     try:
-        async with geoip_sem:
-            async with session.get(
-                f"http://ip-api.com/json/{host}?fields=status,countryCode",
-                timeout=aiohttp.ClientTimeout(total=GEOIP_TIMEOUT)
-            ) as resp:
-                
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get("status") == "success":
-                        cc = data.get("countryCode", "UN")
-                        if cc != "UN":
-                            print(f"[+] GeoIP (API): {host} → {cc}")
-                        return cc
-                    return "UN"
+        # URL'i parse et
+        if link.startswith("vless://"):
+            parsed = urllib.parse.urlparse(link)
+            uuid = parsed.username
+            host = parsed.hostname
+            port = parsed.port or 443
+            return hashlib.md5(f"vless:{uuid}@{host}:{port}".encode()).hexdigest()
+        
+        elif link.startswith("vmess://"):
+            data = json.loads(safe_b64_decode(link.replace("vmess://", "")))
+            uuid = data.get("id")
+            host = data.get("add")
+            port = data.get("port")
+            return hashlib.md5(f"vmess:{uuid}@{host}:{port}".encode()).hexdigest()
+        
+        elif link.startswith("trojan://"):
+            parsed = urllib.parse.urlparse(link)
+            password = parsed.username
+            host = parsed.hostname
+            port = parsed.port or 443
+            return hashlib.md5(f"trojan:{password}@{host}:{port}".encode()).hexdigest()
+        
+        elif link.startswith("ss://"):
+            # Basitleştirilmiş hash
+            base = link.split("#")[0]
+            return hashlib.md5(base.encode()).hexdigest()
+        
+        else:
+            # Fallback: tüm link'i hash'le
+            base = link.split("#")[0]
+            return hashlib.md5(base.encode()).hexdigest()
+    
+    except:
+        # Hata durumunda tüm link
+        return hashlib.md5(link.encode()).hexdigest()
 
-                elif resp.status == 429: # Rate Limit
-                    if retry < GEOIP_MAX_RETRIES:
-                        wait_time = (retry + 2) * 2
-                        print(f"[!] API LİMİTİ (429): {host} için {wait_time}sn bekleniyor...")
-                        await asyncio.sleep(wait_time)
-                        return await get_country_code(session, host, retry + 1)
-
-                else:
-                    if retry < GEOIP_MAX_RETRIES:
-                        await asyncio.sleep(1)
-                        return await get_country_code(session, host, retry + 1)
-
-    except (asyncio.TimeoutError, aiohttp.ClientError):
-        if retry < GEOIP_MAX_RETRIES:
-            await asyncio.sleep(1)
-            return await get_country_code(session, host, retry + 1)
-    except Exception:
-        pass
-
-    return "UN"
-
-async def rename_config(session, link):
-    """Config linkini ülke koduna göre yeniden isimlendir"""
+def rename_config_local(link):
+    """Config'i local GeoIP database ile isimlendir"""
     if not ENABLE_RENAME:
         return link
     
@@ -191,8 +234,8 @@ async def rename_config(session, link):
     
     proto = link.split("://")[0].lower()
     
-    # Ülke kodunu al
-    cc_2letter = await get_country_code(session, host)
+    # GeoIP ile ülke kodu al
+    cc_2letter = get_country_from_ip(host)
     
     # 3 harfli koda çevir
     cc_3letter = COUNTRY_CODE_MAP.get(cc_2letter, "UNK")
@@ -237,6 +280,7 @@ def parse_urls(raw_urls):
             if line.startswith('http://') or line.startswith('https://'):
                 urls.append(line)
     
+    # Duplikaları temizle
     seen = set()
     unique_urls = []
     for url in urls:
@@ -257,29 +301,26 @@ async def fetch_configs_from_url(session, url, url_index, total_urls):
             allow_redirects=True
         ) as resp:
             if resp.status != 200:
-                print(f"[!] [{url_index}/{total_urls}] ❌ HTTP Hatası {resp.status}: {url}")
+                print(f"[!] [{url_index}/{total_urls}] ❌ HTTP {resp.status}: {url}")
                 return []
             
             raw_data = await resp.text()
             
+            # Tüm proxy protokollerini destekle
             configs = []
+            supported_protocols = ['vless://', 'vmess://', 'trojan://', 'ss://', 'ssr://', 'hysteria://']
+            
             for line in raw_data.splitlines():
                 line = line.strip()
                 if line and "://" in line:
-                    if any(proto in line for proto in ['vless://', 'vmess://', 'trojan://', 'ss://', 'ssr://', 'hysteria://']):
+                    if any(proto in line for proto in supported_protocols):
                         configs.append(line)
             
             print(f"[+] [{url_index}/{total_urls}] ✅ {len(configs)} config bulundu")
             return configs
     
-    except asyncio.TimeoutError:
-        print(f"[!] [{url_index}/{total_urls}] ⏱️ Timeout: {url}")
-        return []
-    except aiohttp.ClientError as e:
-        print(f"[!] [{url_index}/{total_urls}] 🌐 Bağlantı hatası: {e}")
-        return []
     except Exception as e:
-        print(f"[!] [{url_index}/{total_urls}] ❌ Beklenmeyen hata: {e}")
+        print(f"[!] [{url_index}/{total_urls}] ❌ Hata: {e}")
         return []
 
 async def fetch_all_configs():
@@ -330,19 +371,56 @@ async def fetch_all_configs():
     
     print("=" * 70)
     print(f"[+] Toplam çekilen: {len(all_configs)} config")
-    print(f"[+] Benzersiz: {len(unique_configs)} config")
+    print(f"[+] Benzersiz (basit): {len(unique_configs)} config")
     if len(all_configs) > len(unique_configs):
-        print(f"[+] Duplikat: {len(all_configs) - len(unique_configs)} config temizlendi")
+        print(f"[+] Basit duplikat: {len(all_configs) - len(unique_configs)} temizlendi")
     print("=" * 70)
     
     return unique_configs
 
 ##################################################
-# İSİMLENDİRME VE YÜKLEME
+# DUPLICATE DETECTION
 ##################################################
 
-async def rename_all_configs(configs):
-    """Tüm configleri isimlendirme"""
+def remove_duplicates(configs):
+    """
+    Akıllı duplicate temizleme
+    Aynı server/port/uuid olan configleri temizle (isim farklı olsa bile)
+    """
+    print("=" * 70)
+    print("🔍 Akıllı duplicate detection başlatılıyor...")
+    print("=" * 70)
+    
+    seen_hashes = {}
+    unique_configs = []
+    duplicate_count = 0
+    
+    for config in configs:
+        config_hash = generate_config_hash(config)
+        
+        if config_hash not in seen_hashes:
+            seen_hashes[config_hash] = config
+            unique_configs.append(config)
+        else:
+            duplicate_count += 1
+            print(f"[!] Duplicate bulundu:")
+            print(f"    Orjinal: {seen_hashes[config_hash][:80]}...")
+            print(f"    Duplikat: {config[:80]}...")
+    
+    print("=" * 70)
+    print(f"[+] Akıllı temizleme tamamlandı")
+    print(f"[+] Benzersiz config: {len(unique_configs)}")
+    print(f"[+] Duplicate temizlendi: {duplicate_count}")
+    print("=" * 70)
+    
+    return unique_configs
+
+##################################################
+# İSİMLENDİRME
+##################################################
+
+def rename_all_configs(configs):
+    """Tüm configleri isimlendir (senkron - çünkü local database)"""
     if not ENABLE_RENAME or not configs:
         return configs
     
@@ -350,21 +428,14 @@ async def rename_all_configs(configs):
     print(f"🏷️ İsimlendirme başlatılıyor ({len(configs)} config)...")
     print("=" * 70)
     
-    connector = aiohttp.TCPConnector(limit=10, limit_per_host=3)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        batch_size = 20
-        renamed_configs = []
+    renamed_configs = []
+    
+    for i, link in enumerate(configs, 1):
+        renamed = rename_config_local(link)
+        renamed_configs.append(renamed)
         
-        for i in range(0, len(configs), batch_size):
-            batch = configs[i:i+batch_size]
-            print(f"[-] İlerleme: {min(i+batch_size, len(configs))}/{len(configs)}")
-            
-            batch_renamed = await asyncio.gather(*[rename_config(session, link) for link in batch])
-            renamed_configs.extend(batch_renamed)
-            
-            # Rate limit için ufak bir bekleme (veritabanı varsa çok şart değil ama güvenli)
-            if i + batch_size < len(configs):
-                await asyncio.sleep(0.5)
+        if i % 50 == 0:
+            print(f"[-] İlerleme: {i}/{len(configs)}")
     
     print("=" * 70)
     print("[+] ✅ İsimlendirme tamamlandı")
@@ -388,8 +459,12 @@ async def rename_all_configs(configs):
     
     return renamed_configs
 
+##################################################
+# YANDEX UPLOAD
+##################################################
+
 async def yandex_disk_upload(content):
-    """Yandex Disk'e dosya yükle"""
+    """Yandex Disk'e yükle"""
     if not YANDEX_TOKEN:
         print("[!] HATA: YANDEX_TOKEN tanımlanmamış!")
         return False
@@ -408,16 +483,10 @@ async def yandex_disk_upload(content):
             ) as resp:
                 if resp.status != 200:
                     print(f"[!] ❌ Yandex API hatası: {resp.status}")
-                    error_text = await resp.text()
-                    print(f"[!] Yanıt: {error_text}")
                     return False
                 
                 data = await resp.json()
                 upload_url = data.get("href")
-                
-                if not upload_url:
-                    print("[!] ❌ Upload URL alınamadı")
-                    return False
             
             async with session.put(
                 upload_url,
@@ -425,19 +494,15 @@ async def yandex_disk_upload(content):
                 timeout=aiohttp.ClientTimeout(total=60)
             ) as resp:
                 if resp.status in [201, 202]:
-                    print(f"[+] ✅ Başarılı: {YANDEX_OUTPUT_FILE} Yandex Disk'e yüklendi")
-                    print(f"[+] 📊 Dosya boyutu: {len(content)} byte ({len(content.splitlines())} satır)")
+                    print(f"[+] ✅ Başarılı: {YANDEX_OUTPUT_FILE}")
+                    print(f"[+] 📊 {len(content)} byte ({len(content.splitlines())} satır)")
                     return True
                 else:
-                    print(f"[!] ❌ Yandex upload hatası: {resp.status}")
-                    error_text = await resp.text()
-                    print(f"[!] Yanıt: {error_text}")
+                    print(f"[!] ❌ Upload hatası: {resp.status}")
                     return False
     
     except Exception as e:
         print(f"[!] Upload hatası: {e}")
-        import traceback
-        traceback.print_exc()
         return False
 
 ##################################################
@@ -445,25 +510,40 @@ async def yandex_disk_upload(content):
 ##################################################
 
 async def main():
-    """Ana program akışı"""
+    """Ana program"""
     print("=" * 70)
-    print("🚀 GitHub Action - Multi-URL with Renaming (Hybrid GeoIP)")
+    print("🚀 GitHub Action - GeoIP + Deduplication")
     print("=" * 70)
     
     if not CONFIG_URLS or not YANDEX_TOKEN:
-        print("[!] HATA: CONFIG_URLS veya YANDEX_TOKEN secrets eksik!")
+        print("[!] HATA: CONFIG_URLS veya YANDEX_TOKEN eksik!")
         sys.exit(1)
     
+    # 1. GeoIP database indir
+    if ENABLE_RENAME:
+        if not await download_geoip_db():
+            print("[!] GeoIP database yüklenemedi, isimlendirme devre dışı")
+    
+    # 2. Configleri çek
     configs = await fetch_all_configs()
     
     if not configs:
-        print("[!] ❌ Hiçbir config bulunamadı veya çekilemedi")
+        print("[!] ❌ Hiçbir config bulunamadı")
         sys.exit(1)
     
-    renamed_configs = await rename_all_configs(configs)
+    # 3. Akıllı duplicate temizleme
+    unique_configs = remove_duplicates(configs)
     
+    # 4. İsimlendirme (senkron - local database)
+    renamed_configs = rename_all_configs(unique_configs)
+    
+    # 5. Yandex'e yükle
     content = "\n".join(renamed_configs)
     success = await yandex_disk_upload(content)
+    
+    # 6. GeoIP database temizle
+    if geoip_reader:
+        geoip_reader.close()
     
     if success:
         print("=" * 70)
@@ -478,10 +558,10 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n[!] ⚠️ Kullanıcı tarafından durduruldu")
+        print("\n[!] ⚠️ Durduruldu")
         sys.exit(130)
     except Exception as e:
-        print(f"[!] ❌ Fatal hata: {e}")
+        print(f"[!] ❌ Fatal: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
