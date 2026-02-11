@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-GitHub Action Script - Base64 Fix & Smart Rename v2.1
-- Base64 abonelikleri otomatik çözülür.
-- VMess JSON içindeki (ps) isimleri okunur.
-- Akıllı duplicate ve bayrak tespiti.
+GitHub Action Script - Ultimate Proxy Manager v2.2
+- Base64 abonelikleri otomatik çözer.
+- VMess JSON içindeki (ps) isimleri ve bayrakları okur.
+- Cloudflare engeli için User-Agent eklenmiştir.
+- Akıllı duplicate ve bayrak tespiti içerir.
 """
 
 import os
@@ -16,9 +17,10 @@ import base64
 import hashlib
 import urllib.parse
 
+# UTF-8 ayarı (Emojiler için kritik)
 sys.stdout.reconfigure(encoding='utf-8')
 
-# Ayarlar
+# --- AYARLAR (GitHub Secrets / Env) ---
 CONFIG_URLS = os.getenv("CONFIG_URLS")
 YANDEX_TOKEN = os.getenv("YANDEX_TOKEN")
 YANDEX_OUTPUT_FILE = os.getenv("YANDEX_OUTPUT_FILE", "/working_configs.txt")
@@ -29,288 +31,212 @@ ENABLE_RENAME = os.getenv("ENABLE_RENAME", "true").lower() == "true"
 rename_counter = {}
 
 ##################################################
-# PARSER HELPERS
+# YARDIMCI ARAÇLAR (DECODE & HASH)
 ##################################################
 
 def safe_b64_decode(s):
-    """Base64 decode - hata toleranslı"""
+    """Base64 decode - Padding ve URL-safe hatalarını giderir."""
     if not s: return ""
     try:
-        # URL safe karakter düzeltmeleri
         s = s.strip().replace("-", "+").replace("_", "/")
-        # Padding ekle
         padding = len(s) % 4
         if padding:
             s += "=" * (4 - padding)
         return base64.b64decode(s).decode("utf-8", errors="ignore")
-    except Exception:
+    except:
         return ""
 
 def generate_config_hash(link):
-    """Config'in benzersiz hash'ini oluştur"""
+    """Config'in benzersiz kimliğini oluşturur (Duplicate kontrolü)."""
     try:
-        if link.startswith("vless://") or link.startswith("trojan://"):
-            parsed = urllib.parse.urlparse(link)
-            uuid = parsed.username
-            host = parsed.hostname
-            port = parsed.port or 443
-            return hashlib.md5(f"{parsed.scheme}:{uuid}@{host}:{port}".encode()).hexdigest()
+        # Linkin config kısmını al (# sonrasını at)
+        clean_link = link.split('#')[0]
         
-        elif link.startswith("vmess://"):
-            try:
-                data = json.loads(safe_b64_decode(link.replace("vmess://", "")))
-                uuid = data.get("id", "")
-                host = data.get("add", "")
-                port = data.get("port", "")
-                return hashlib.md5(f"vmess:{uuid}@{host}:{port}".encode()).hexdigest()
-            except:
-                return hashlib.md5(link.encode()).hexdigest()
+        if clean_link.startswith("vmess://"):
+            data_raw = safe_b64_decode(clean_link.replace("vmess://", ""))
+            data = json.loads(data_raw)
+            # Host, port ve id'yi birleştirip hashle
+            key = f"vmess:{data.get('add')}:{data.get('port')}:{data.get('id')}"
+            return hashlib.md5(key.encode()).hexdigest()
         
-        else:
-            base = link.split("#")[0]
-            return hashlib.md5(base.encode()).hexdigest()
+        elif "://" in clean_link:
+            # Diğer protokoller için (vless, trojan, ss)
+            parsed = urllib.parse.urlparse(clean_link)
+            key = f"{parsed.scheme}:{parsed.username}@{parsed.hostname}:{parsed.port}"
+            return hashlib.md5(key.encode()).hexdigest()
+        
+        return hashlib.md5(clean_link.encode()).hexdigest()
     except:
         return hashlib.md5(link.encode()).hexdigest()
 
 ##################################################
-# RENAME - GÜÇLENDİRİLMİŞ
+# İSİMLENDİRME VE BAYRAK ANALİZİ
 ##################################################
 
 def get_vmess_remark(link):
-    """VMess linkinden 'ps' (isim) bilgisini çeker"""
+    """VMess linkinin içindeki JSON'dan 'ps' (isim) alanını çeker."""
     try:
-        b64_part = link.replace("vmess://", "")
+        b64_part = re.sub(r'^vmess://', '', link.split('#')[0], flags=re.IGNORECASE).strip()
         decoded = safe_b64_decode(b64_part)
-        data = json.loads(decoded)
-        return data.get("ps", "")
+        if decoded:
+            data = json.loads(decoded)
+            return str(data.get("ps", "")).strip()
     except:
-        return ""
+        pass
+    return ""
 
 def rename_config_simple(link):
-    """
-    Gelişmiş İsimlendirme:
-    1. Önce URL fragment (#sonrası) kontrol edilir.
-    2. Yoksa ve VMess ise, JSON decode edilip 'ps' değerine bakılır.
-    3. Bayrak bulunur ve yeniden adlandırılır.
-    """
+    """Config'i analiz eder ve Bayrak + Ülke Kodu + Protokol olarak yeniden adlandırır."""
     if not ENABLE_RENAME:
         return link
     
-    proto = link.split("://")[0].lower()
-    base_config = link.split('#')[0]
-    
-    # İsim/Remark bulma çabası
-    original_remark = ""
-    if '#' in link:
-        original_remark = link.split('#', 1)[1]
-    
-    # Eğer remark yoksa ve VMess ise, içeriği çözüp bak
-    if not original_remark and proto == "vmess":
-        original_remark = get_vmess_remark(base_config)
-    
-    # URL decode yapalım ki %F0%9F gibi emojiler düzelsin
     try:
-        original_remark = urllib.parse.unquote(original_remark)
-    except:
-        pass
-
-    # Emoji/Bayrak bul
-    emoji_pattern = re.compile(r'([\U0001F1E6-\U0001F1FF]{2}|[\U0001F300-\U0001F9FF])')
-    emoji_match = emoji_pattern.search(original_remark)
-    
-    new_name = ""
-    
-    if not emoji_match:
-        # Bayrak yok -> sadece protokol + numara
-        key = proto
-        if key not in rename_counter: rename_counter[key] = 0
-        rename_counter[key] += 1
-        new_name = f"{proto}{rename_counter[key]}"
-    else:
-        # Bayrak var
-        flag_emoji = emoji_match.group(1)
+        # Protokolü bul (vless, vmess vb.)
+        proto_match = re.match(r'^([^:]+)', link)
+        proto = proto_match.group(1).lower() if proto_match else "proxy"
+        base_link = link.split('#')[0]
         
-        # Ülke bayrağı mı?
-        if len(flag_emoji) == 2 and '\U0001F1E6' <= flag_emoji[0] <= '\U0001F1FF':
-            code_points = [ord(c) - 0x1F1E6 + ord('A') for c in flag_emoji]
-            country_code = ''.join(chr(c) for c in code_points)
-            
-            country_map = {
-                "JP": "JAP", "US": "USA", "DE": "GER", "GB": "GBR", "FR": "FRA",
-                "TR": "TUR", "NL": "NLD", "SG": "SGP", "CA": "CAN", "HK": "HKG",
-                "IT": "ITA", "ES": "ESP", "RU": "RUS", "KR": "KOR", "BR": "BRA",
-                "AU": "AUS", "IN": "IND", "SE": "SWE", "CH": "CHE", "CN": "CHN",
-                "TW": "TWN", "IR": "IRN"
-            }
-            country_3 = country_map.get(country_code, country_code)
-            
-            key = f"{flag_emoji}_{country_3}_{proto}"
-            if key not in rename_counter: rename_counter[key] = 0
-            rename_counter[key] += 1
-            
-            new_name = f"{flag_emoji}{country_3}-{proto}{rename_counter[key]}"
+        # 1. Aşama: İsim (remark) bulma
+        remark = ""
+        if '#' in link:
+            # URL sonunda etiket varsa al
+            remark = link.split('#', 1)[1]
+        
+        if not remark and proto == "vmess":
+            # Etiket yoksa VMess JSON içine bak
+            remark = get_vmess_remark(base_link)
+        
+        # URL Decode (Emoji kodlarını gerçek emojiye çevirir)
+        remark = urllib.parse.unquote(remark)
+
+        # 2. Aşama: Emoji/Bayrak tespiti
+        emoji_pattern = re.compile(r'([\U0001F1E6-\U0001F1FF]{2}|[\U0001F300-\U0001F9FF])')
+        emoji_match = emoji_pattern.search(remark)
+        
+        if not emoji_match:
+            # Bayrak yoksa: vmess1, vless2 vb.
+            key = proto
+            rename_counter[key] = rename_counter.get(key, 0) + 1
+            new_name = f"{proto}{rename_counter[key]}"
         else:
-            # Diğer emoji
-            key = f"{flag_emoji}_{proto}"
-            if key not in rename_counter: rename_counter[key] = 0
-            rename_counter[key] += 1
-            new_name = f"{flag_emoji}{proto}{rename_counter[key]}"
-    
-    return f"{base_config}#{new_name}"
+            flag = emoji_match.group(1)
+            # Eğer ülke bayrağıysa kodu 3 harfliye çevir (JP -> JAP)
+            if len(flag) == 2 and '\U0001F1E6' <= flag[0] <= '\U0001F1FF':
+                code_points = [ord(c) - 0x1F1E6 + ord('A') for c in flag]
+                c_code = ''.join(chr(c) for c in code_points)
+                
+                mapping = {
+                    "JP": "JAP", "US": "USA", "DE": "GER", "GB": "GBR", "FR": "FRA",
+                    "TR": "TUR", "NL": "NLD", "SG": "SGP", "CA": "CAN", "HK": "HKG",
+                    "RU": "RUS", "KR": "KOR", "IR": "IRN", "IT": "ITA", "ES": "ESP"
+                }
+                c_3 = mapping.get(c_code, c_code)
+                key = f"{flag}_{c_3}_{proto}"
+                rename_counter[key] = rename_counter.get(key, 0) + 1
+                new_name = f"{flag}{c_3}-{proto}{rename_counter[key]}"
+            else:
+                # Diğer emojiler (🔥, 🌐)
+                key = f"{flag}_{proto}"
+                rename_counter[key] = rename_counter.get(key, 0) + 1
+                new_name = f"{flag}{proto}{rename_counter[key]}"
+        
+        return f"{base_link}#{new_name}"
+    except:
+        return link
 
 ##################################################
-# URL FETCHING - BASE64 DESTEKLİ
+# VERİ ÇEKME (HTTP FETCH)
 ##################################################
 
-def parse_urls(raw_urls):
-    if not raw_urls: return []
-    urls = []
-    for line in raw_urls.strip().split('\n'):
-        line = line.strip()
-        if not line or line.startswith('#'): continue
-        if line.startswith('http'): urls.append(line)
-    return list(dict.fromkeys(urls)) # Unique
-
-async def fetch_configs_from_url(session, url, url_index, total_urls):
-    """
-    URL'den config çeker. 
-    Eğer içerik Base64 blob ise decode eder.
-    """
+async def fetch_configs_from_url(session, url, idx, total):
+    """URL'den veriyi çeker, Base64 ise çözer ve configleri ayıklar."""
     try:
-        print(f"[-] [{url_index}/{total_urls}] URL çekiliyor: {url}")
+        print(f"[-] [{idx}/{total}] Çekiliyor: {url}")
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"}
         
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        
-        async with session.get(
-            url.strip(), 
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=45),
-            allow_redirects=True
-        ) as resp:
-            if resp.status != 200:
-                print(f"[!] [{url_index}/{total_urls}] ❌ HTTP {resp.status}")
-                return []
+        async with session.get(url.strip(), headers=headers, timeout=30) as resp:
+            if resp.status != 200: return []
             
-            raw_data = await resp.text()
+            text = await resp.text()
             
-            # --- BASE64 DETECT & FIX ---
-            # Eğer raw_data içinde '://' yoksa, muhtemelen tüm dosya base64 encoded'dır.
-            if "://" not in raw_data:
-                try:
-                    decoded_data = safe_b64_decode(raw_data)
-                    # Decode ettikten sonra protokol kontrolü yap
-                    if "://" in decoded_data:
-                        print(f"[i] [{url_index}/{total_urls}] 🔓 Base64 abonelik çözüldü")
-                        raw_data = decoded_data
-                except:
-                    pass # Decode edilemediyse orjinal kalsın
-            # ---------------------------
-
+            # --- OTOMATİK BASE64 ABONELİK ÇÖZÜMÜ ---
+            if "://" not in text and len(text.strip()) > 10:
+                decoded = safe_b64_decode(text)
+                if "://" in decoded:
+                    print(f"    [i] Base64 abonelik içeriği çözüldü.")
+                    text = decoded
+            
             configs = []
-            supported_protocols = ['vless://', 'vmess://', 'trojan://', 'ss://', 'ssr://', 'hysteria://', 'hysteria2://', 'tuic://']
+            protos = ['vless://', 'vmess://', 'trojan://', 'ss://', 'ssr://', 'hysteria', 'tuic://']
             
-            for line in raw_data.splitlines():
+            for line in text.splitlines():
                 line = line.strip()
                 if not line: continue
-                
-                # Eğer satır tek başına bir base64 ise (bazen satır satır base64 olur)
-                if "://" not in line and len(line) > 20:
+                # Satır bazlı base64 kontrolü
+                if "://" not in line and len(line) > 30:
                     try:
-                        decoded_line = safe_b64_decode(line)
-                        if "://" in decoded_line:
-                            line = decoded_line
-                    except:
-                        pass
-
-                if any(proto in line for proto in supported_protocols):
+                        d_line = safe_b64_decode(line)
+                        if "://" in d_line: line = d_line
+                    except: pass
+                
+                if any(p in line for p in protos):
                     configs.append(line)
             
-            print(f"[+] [{url_index}/{total_urls}] ✅ {len(configs)} config bulundu")
             return configs
-    
     except Exception as e:
-        print(f"[!] [{url_index}/{total_urls}] ❌ Hata: {e}")
+        print(f"    [!] Hata: {url} -> {e}")
         return []
 
-async def fetch_all_configs():
-    if not CONFIG_URLS: return None
-    url_list = parse_urls(CONFIG_URLS)
-    if not url_list: return None
-    
-    print("=" * 70)
-    print(f"📋 {len(url_list)} URL işlenecek")
-    
-    all_configs = []
-    # User-Agent taklidi için session ayarları
-    connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT_REQUESTS, ssl=False)
-    
-    async with aiohttp.ClientSession(connector=connector) as session:
-        tasks = [fetch_configs_from_url(session, url, i+1, len(url_list)) for i, url in enumerate(url_list)]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        for result in results:
-            if isinstance(result, list):
-                all_configs.extend(result)
-    
-    return list(dict.fromkeys(all_configs))
-
 ##################################################
-# MAIN FLOW
+# ANA DÖNGÜ VE YÜKLEME
 ##################################################
 
-def remove_duplicates(configs):
-    print("=" * 70)
-    print("🔍 Duplicate temizliği...")
-    seen = {}
-    unique = []
-    for c in configs:
-        h = generate_config_hash(c)
-        if h not in seen:
-            seen[h] = c
-            unique.append(c)
-    print(f"[+] Benzersiz: {len(unique)} / {len(configs)}")
-    return unique
-
-async def yandex_disk_upload(content):
+async def yandex_upload(content):
     if not YANDEX_TOKEN: return False
+    headers = {"Authorization": f"OAuth {YANDEX_TOKEN}"}
     try:
-        headers = {"Authorization": f"OAuth {YANDEX_TOKEN}"}
         async with aiohttp.ClientSession() as sess:
-            # 1. Get upload link
-            async with sess.get(f"{YANDEX_API_BASE}/resources/upload", params={"path": YANDEX_OUTPUT_FILE, "overwrite": "true"}, headers=headers) as resp:
-                if resp.status != 200: return False
-                href = (await resp.json()).get("href")
-            
-            # 2. Upload
-            async with sess.put(href, data=content.encode('utf-8')) as resp:
-                return resp.status in [201, 202]
+            # Yükleme linki al
+            async with sess.get(f"{YANDEX_API_BASE}/resources/upload", params={"path": YANDEX_OUTPUT_FILE, "overwrite": "true"}, headers=headers) as r:
+                if r.status != 200: return False
+                url = (await r.json()).get("href")
+            # Dosyayı gönder
+            async with sess.put(url, data=content.encode('utf-8')) as r:
+                return r.status in [201, 202]
     except: return False
 
 async def main():
-    print("🚀 Script Başlatıldı (v2.1 Fix)")
-    if not CONFIG_URLS or not YANDEX_TOKEN:
-        print("[!] Token veya URL eksik")
-        sys.exit(1)
-        
-    configs = await fetch_all_configs()
-    if not configs:
-        print("[!] Config bulunamadı")
-        sys.exit(1)
-        
-    unique = remove_duplicates(configs)
+    print("🚀 GitHub Action - Proxy Sync v2.2 Başlatıldı")
     
-    print("=" * 70)
-    print("🏷️ İsimlendirme yapılıyor...")
-    renamed = [rename_config_simple(c) for c in unique]
+    if not CONFIG_URLS:
+        print("[!] CONFIG_URLS bulunamadı!"); return
+
+    urls = [u.strip() for u in CONFIG_URLS.split('\n') if u.strip() and not u.startswith('#')]
+    all_configs = []
+
+    async with aiohttp.ClientSession() as session:
+        tasks = [fetch_configs_from_url(session, url, i+1, len(urls)) for i, url in enumerate(urls)]
+        results = await asyncio.gather(*tasks)
+        for r in results: all_configs.extend(r)
+
+    if not all_configs:
+        print("[!] Hiç config toplanamadı!"); return
+
+    # 1. Tekilleştirme (Hash tabanlı)
+    unique_map = {}
+    for c in all_configs:
+        h = generate_config_hash(c)
+        if h not in unique_map: unique_map[h] = c
     
-    content = "\n".join(renamed)
-    if await yandex_disk_upload(content):
-        print("[+] ✅ Yandex Upload Başarılı!")
+    # 2. İsimlendirme
+    final_configs = [rename_config_simple(c) for c in unique_map.values()]
+
+    # 3. Yandex Disk'e Kaydet
+    content = "\n".join(final_configs)
+    if await yandex_upload(content):
+        print(f"✅ Başarılı! {len(final_configs)} config Yandex Disk'e yüklendi.")
     else:
-        print("[!] ❌ Upload Başarısız")
-        sys.exit(1)
+        print("❌ Yandex Disk yüklemesi başarısız.")
 
 if __name__ == "__main__":
     asyncio.run(main())
