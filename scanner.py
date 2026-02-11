@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-GitHub Action Script - Simplified v2.1
+GitHub Action Script - Simplified v2.2
 - GeoIP KALDIRILDI (gereksiz)
 - Mevcut bayrak/emoji kullanımı (🇩🇪, 🔥, vb.)
 - Ülke kodu + protokol ekleme (örn: 🇩🇪 DE-vless, 🔥 Best-trojan)
 - Akıllı duplicate detection korundu
 - FIX: vmess base64 configlerde ps alanından emoji/isim çekme eklendi
+- FIX: ps alanında URL decode desteği eklendi
 """
 
 import os
@@ -133,7 +134,11 @@ def rename_config_simple(link):
                 vmess_data = json.loads(decoded)
                 ps = vmess_data.get("ps", "")
                 if ps:
-                    fragment = ps
+                    # URL decode - emoji'ler encode edilmiş olabilir
+                    try:
+                        fragment = urllib.parse.unquote(ps)
+                    except:
+                        fragment = ps
         except:
             pass
     
@@ -172,7 +177,7 @@ def rename_config_simple(link):
         
         # Örnek: 🇯🇵 → JP → JAP
         country_map = {
-            "JP": "JAP", "US": "USA", "DE": "GER", "GB": "GBR", "FR": "FRA",
+            "AL": "ALB", "JP": "JAP", "US": "USA", "DE": "GER", "GB": "GBR", "FR": "FRA",
             "TR": "TUR", "NL": "NLD", "SG": "SGP", "CA": "CAN", "HK": "HKG",
             "IT": "ITA", "ES": "ESP", "RU": "RUS", "KR": "KOR", "BR": "BRA",
             "AU": "AUS", "IN": "IND", "SE": "SWE", "CH": "CHE", "CN": "CHN",
@@ -181,7 +186,9 @@ def rename_config_simple(link):
             "VN": "VNM", "ID": "IDN", "MY": "MYS", "PH": "PHL", "NZ": "NZL",
             "UA": "UKR", "HU": "HUN", "SK": "SVK", "BG": "BGR", "PL": "POL",
             "FI": "FIN", "NO": "NOR", "DK": "DNK", "AT": "AUT", "BE": "BEL",
-            "CZ": "CZE", "IE": "IRL", "PT": "PRT", "GR": "GRC", "RO": "ROU"
+            "CZ": "CZE", "IE": "IRL", "PT": "PRT", "GR": "GRC", "RO": "ROU",
+            "LT": "LTU", "LV": "LVA", "EE": "EST", "SI": "SVN", "HR": "HRV",
+            "RS": "SRB", "BA": "BIH", "MK": "MKD", "ME": "MNE", "XK": "XKS"
         }
         country_3 = country_map.get(country_code, country_code)
         
@@ -471,7 +478,7 @@ async def yandex_disk_upload(content):
 async def main():
     """Ana program"""
     print("=" * 70)
-    print("🚀 GitHub Action - Simple Rename (v2.1 - vmess fix)")
+    print("🚀 GitHub Action - Simple Rename (v2.2 - vmess fix + url decode)")
     print("=" * 70)
     
     if not CONFIG_URLS or not YANDEX_TOKEN:
