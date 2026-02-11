@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-GitHub Action Script - Simplified v2.2
+GitHub Action Script - Simplified v2.3
 - GeoIP KALDIRILDI (gereksiz)
 - Mevcut bayrak/emoji kullanımı (🇩🇪, 🔥, vb.)
 - Ülke kodu + protokol ekleme (örn: 🇩🇪 DE-vless, 🔥 Best-trojan)
 - Akıllı duplicate detection korundu
 - FIX: vmess base64 configlerde ps alanından emoji/isim çekme eklendi
 - FIX: ps alanında URL decode desteği eklendi
+- FIX: İşlem sırası düzeltildi - önce isimlendirme, sonra duplicate temizleme
 """
 
 import os
@@ -478,7 +479,7 @@ async def yandex_disk_upload(content):
 async def main():
     """Ana program"""
     print("=" * 70)
-    print("🚀 GitHub Action - Simple Rename (v2.2 - vmess fix + url decode)")
+    print("🚀 GitHub Action - Simple Rename (v2.3 - fix: rename before dedup)")
     print("=" * 70)
     
     if not CONFIG_URLS or not YANDEX_TOKEN:
@@ -492,19 +493,19 @@ async def main():
         print("[!] ❌ Hiçbir config bulunamadı")
         sys.exit(1)
     
-    # 2. Akıllı duplicate temizleme
-    unique_configs = remove_duplicates(configs)
+    # 2. Basit isimlendirme (ÖNCE İSİMLENDİRME!)
+    renamed_configs = rename_all_configs(configs)
     
-    # 3. Basit isimlendirme
-    renamed_configs = rename_all_configs(unique_configs)
+    # 3. Akıllı duplicate temizleme (İSİMLENDİRMEDEN SONRA!)
+    unique_configs = remove_duplicates(renamed_configs)
     
     # 4. Yandex'e yükle
-    content = "\n".join(renamed_configs)
+    content = "\n".join(unique_configs)
     success = await yandex_disk_upload(content)
     
     if success:
         print("=" * 70)
-        print(f"[+] ✅ İşlem tamamlandı: {len(renamed_configs)} config yüklendi")
+        print(f"[+] ✅ İşlem tamamlandı: {len(unique_configs)} config yüklendi")
         print("=" * 70)
         sys.exit(0)
     else:
