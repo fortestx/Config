@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-GitHub Action Script - Multi-URL to Yandex Disk with Local GeoIP & Deduplication
-- GeoIP database kullanarak rate limit yok
-- Akıllı duplicate detection (aynı server/port/uuid farklı isim)
-- Geliştirilmiş parser (ssr, hysteria desteği)
+GitHub Action Script - Simplified v2.0
+- GeoIP KALDIRILDI (gereksiz)
+- Mevcut bayrak/emoji kullanımı (🇩🇪, 🔥, vb.)
+- Ülke kodu + protokol ekleme (örn: 🇩🇪 DE-vless, 🔥 Best-trojan)
+- Akıllı duplicate detection korundu
 """
 
 import os
@@ -25,99 +26,11 @@ YANDEX_OUTPUT_FILE = os.getenv("YANDEX_OUTPUT_FILE", "/working_configs.txt")
 YANDEX_API_BASE = "https://cloud-api.yandex.net/v1/disk"
 MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", "5"))
 ENABLE_RENAME = os.getenv("ENABLE_RENAME", "true").lower() == "true"
-GEOIP_DB_URL = "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-Country.mmdb"
-
-# Ülke Kodu Haritaları
-COUNTRY_CODE_MAP = {
-    "TR": "TUR", "US": "USA", "DE": "GER", "GB": "GBR", "FR": "FRA",
-    "NL": "NLD", "SG": "SGP", "JP": "JPN", "CA": "CAN", "HK": "HKG",
-    "IT": "ITA", "ES": "ESP", "RU": "RUS", "KR": "KOR", "BR": "BRA",
-    "AU": "AUS", "IN": "IND", "SE": "SWE", "CH": "CHE", "PL": "POL",
-    "FI": "FIN", "NO": "NOR", "DK": "DNK", "AT": "AUT", "BE": "BEL",
-    "CZ": "CZE", "IE": "IRL", "PT": "PRT", "GR": "GRC", "RO": "ROU",
-    "CN": "CHN", "TW": "TWN", "MX": "MEX", "AR": "ARG", "CL": "CHL",
-    "ZA": "ZAF", "EG": "EGY", "IL": "ISR", "SA": "SAU", "AE": "ARE",
-    "TH": "THA", "VN": "VNM", "ID": "IDN", "MY": "MYS", "PH": "PHL",
-    "NZ": "NZL", "UA": "UKR", "HU": "HUN", "SK": "SVK", "BG": "BGR"
-}
-
-FLAGS = {
-    "TR": "🇹🇷", "US": "🇺🇸", "DE": "🇩🇪", "GB": "🇬🇧", "FR": "🇫🇷", 
-    "NL": "🇳🇱", "SG": "🇸🇬", "JP": "🇯🇵", "CA": "🇨🇦", "HK": "🇭🇰",
-    "IT": "🇮🇹", "ES": "🇪🇸", "RU": "🇷🇺", "KR": "🇰🇷", "BR": "🇧🇷",
-    "AU": "🇦🇺", "IN": "🇮🇳", "SE": "🇸🇪", "CH": "🇨🇭", "PL": "🇵🇱",
-    "FI": "🇫🇮", "NO": "🇳🇴", "DK": "🇩🇰", "AT": "🇦🇹", "BE": "🇧🇪",
-    "CZ": "🇨🇿", "IE": "🇮🇪", "PT": "🇵🇹", "GR": "🇬🇷", "RO": "🇷🇴",
-    "CN": "🇨🇳", "TW": "🇹🇼", "MX": "🇲🇽", "AR": "🇦🇷", "CL": "🇨🇱",
-    "ZA": "🇿🇦", "EG": "🇪🇬", "IL": "🇮🇱", "SA": "🇸🇦", "AE": "🇦🇪",
-    "TH": "🇹🇭", "VN": "🇻🇳", "ID": "🇮🇩", "MY": "🇲🇾", "PH": "🇵🇭",
-    "NZ": "🇳🇿", "UA": "🇺🇦", "HU": "🇭🇺", "SK": "🇸🇰", "BG": "🇧🇬"
-}
 
 rename_counter = {}
-geoip_reader = None
 
 ##################################################
-# GEOIP DATABASE
-##################################################
-
-async def download_geoip_db():
-    """GeoIP database'i indir"""
-    global geoip_reader
-    
-    try:
-        print("[*] GeoIP database indiriliyor...")
-        
-        # geoip2 modülünü yükle
-        try:
-            import geoip2.database
-        except ImportError:
-            print("[!] geoip2 modülü yüklü değil, pip install yapılıyor...")
-            import subprocess
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "geoip2", "-q"])
-            import geoip2.database
-        
-        # Database'i indir
-        db_path = "/tmp/GeoLite2-Country.mmdb"
-        
-        if not os.path.exists(db_path):
-            async with aiohttp.ClientSession() as session:
-                async with session.get(GEOIP_DB_URL, timeout=aiohttp.ClientTimeout(total=60)) as resp:
-                    if resp.status == 200:
-                        with open(db_path, 'wb') as f:
-                            f.write(await resp.read())
-                        print(f"[+] GeoIP database indirildi: {db_path}")
-                    else:
-                        print(f"[!] GeoIP download hatası: {resp.status}")
-                        return False
-        else:
-            print(f"[+] GeoIP database mevcut: {db_path}")
-        
-        # Reader'ı aç
-        geoip_reader = geoip2.database.Reader(db_path)
-        print("[+] GeoIP database hazır!")
-        return True
-    
-    except Exception as e:
-        print(f"[!] GeoIP database hatası: {e}")
-        return False
-
-def get_country_from_ip(ip):
-    """IP'den ülke kodunu al (local database ile)"""
-    global geoip_reader
-    
-    if not geoip_reader:
-        return "UN"
-    
-    try:
-        response = geoip_reader.country(ip)
-        cc = response.country.iso_code
-        return cc if cc else "UN"
-    except:
-        return "UN"
-
-##################################################
-# GELİŞTİRİLMİŞ PARSER
+# PARSER HELPERS
 ##################################################
 
 def safe_b64_decode(s):
@@ -131,63 +44,12 @@ def safe_b64_decode(s):
     except:
         return ""
 
-def extract_host_from_link(link):
-    """Link'ten host bilgisini çıkar - GELİŞTİRİLMİŞ"""
-    try:
-        # VLESS, Trojan
-        if link.startswith(("vless://", "trojan://")):
-            match = re.search(r'@([^:/?]+)', link)
-            if match:
-                return match.group(1)
-        
-        # VMess
-        elif link.startswith("vmess://"):
-            data = json.loads(safe_b64_decode(link.replace("vmess://", "")))
-            return data.get("add")
-        
-        # Shadowsocks
-        elif link.startswith("ss://"):
-            content = link.replace("ss://", "").split("#")[0]
-            
-            # Format 1: method:password@server:port
-            if "@" in content:
-                server_part = content.split("@")[1]
-                match = re.search(r'^([^:]+)', server_part)
-                if match:
-                    return match.group(1)
-            
-            # Format 2: base64(method:password)@server:port
-            else:
-                decoded = safe_b64_decode(content)
-                if "@" in decoded:
-                    match = re.search(r'@([^:]+)', decoded)
-                    if match:
-                        return match.group(1)
-        
-        # SSR
-        elif link.startswith("ssr://"):
-            decoded = safe_b64_decode(link.replace("ssr://", ""))
-            match = re.search(r'^([^:]+)', decoded)
-            if match:
-                return match.group(1)
-        
-        # Hysteria
-        elif link.startswith("hysteria://"):
-            parsed = urllib.parse.urlparse(link)
-            return parsed.hostname
-        
-    except:
-        pass
-    
-    return None
-
 def generate_config_hash(link):
     """
     Config'in benzersiz hash'ini oluştur (duplicate detection için)
     Host, port, uuid/password kombinasyonuna göre
     """
     try:
-        # URL'i parse et
         if link.startswith("vless://"):
             parsed = urllib.parse.urlparse(link)
             uuid = parsed.username
@@ -210,46 +72,83 @@ def generate_config_hash(link):
             return hashlib.md5(f"trojan:{password}@{host}:{port}".encode()).hexdigest()
         
         elif link.startswith("ss://"):
-            # Basitleştirilmiş hash
             base = link.split("#")[0]
             return hashlib.md5(base.encode()).hexdigest()
         
+        elif link.startswith("ssr://"):
+            base = link.split("#")[0]
+            return hashlib.md5(base.encode()).hexdigest()
+        
+        elif link.startswith("hysteria://"):
+            parsed = urllib.parse.urlparse(link)
+            host = parsed.hostname
+            port = parsed.port or 443
+            return hashlib.md5(f"hysteria:{host}:{port}".encode()).hexdigest()
+        
         else:
-            # Fallback: tüm link'i hash'le
             base = link.split("#")[0]
             return hashlib.md5(base.encode()).hexdigest()
     
     except:
-        # Hata durumunda tüm link
         return hashlib.md5(link.encode()).hexdigest()
 
-def rename_config_local(link):
-    """Config'i local GeoIP database ile isimlendir"""
+##################################################
+# RENAME - BASİTLEŞTİRİLMİŞ
+##################################################
+
+def rename_config_simple(link):
+    """
+    Basit isimlendirme - sadece mevcut bayrak/emoji + protokol
+    Örnekler:
+      🇩🇪 DE-vless
+      🇺🇸 US-trojan
+      🔥 vless
+      vless (bayrak yoksa)
+    """
     if not ENABLE_RENAME:
         return link
     
-    host = extract_host_from_link(link)
-    if not host:
-        return link
-    
+    # Protokol al
     proto = link.split("://")[0].lower()
     
-    # GeoIP ile ülke kodu al
-    cc_2letter = get_country_from_ip(host)
+    # Fragment (# sonrası) var mı kontrol et
+    if '#' not in link:
+        # Fragment yok - sadece protokol ekle
+        return f"{link}#{proto}"
     
-    # 3 harfli koda çevir
-    cc_3letter = COUNTRY_CODE_MAP.get(cc_2letter, "UNK")
+    # Fragment'i ayır
+    base_config, fragment = link.rsplit('#', 1)
+    fragment = urllib.parse.unquote(fragment)
     
-    # Bayrak al
-    flag = FLAGS.get(cc_2letter, "🌐")
+    # Emoji/Bayrak bul (herhangi bir emoji)
+    # Ülke bayrakları: 🇦-🇿 (2 karakter)
+    # Diğer emojiler: 🔥, 🌐, ⚡, vb.
+    emoji_pattern = re.compile(r'([\U0001F1E6-\U0001F1FF]{2}|[\U0001F300-\U0001F9FF])')
+    emoji_match = emoji_pattern.search(fragment)
     
-    # Sayaç
-    if cc_3letter not in rename_counter:
-        rename_counter[cc_3letter] = 0
-    rename_counter[cc_3letter] += 1
+    if not emoji_match:
+        # Emoji yok - sadece protokol
+        return f"{base_config}#{proto}"
     
-    new_name = f"{flag} {cc_3letter}{rename_counter[cc_3letter]}-{proto}"
-    base_config = link.split("#")[0]
+    flag_emoji = emoji_match.group(1)
+    
+    # Ülke bayrağı mı yoksa diğer emoji mi?
+    if len(flag_emoji) == 2 and '\U0001F1E6' <= flag_emoji[0] <= '\U0001F1FF':
+        # Ülke bayrağı - 2 harfli koda çevir
+        # Örnek: 🇩🇪 → DE
+        code_points = [ord(c) - 0x1F1E6 + ord('A') for c in flag_emoji]
+        country_code = ''.join(chr(c) for c in code_points)
+        new_name = f"{flag_emoji} {country_code}-{proto}"
+    else:
+        # Diğer emoji (🔥, 🌐, ⚡, vb.) - direkt kullan
+        new_name = f"{flag_emoji} {proto}"
+    
+    # Aynı isimden varsa numara ekle
+    if new_name in rename_counter:
+        rename_counter[new_name] += 1
+        new_name = f"{new_name}{rename_counter[new_name]}"
+    else:
+        rename_counter[new_name] = 1
     
     return f"{base_config}#{new_name}"
 
@@ -403,9 +302,13 @@ def remove_duplicates(configs):
             unique_configs.append(config)
         else:
             duplicate_count += 1
-            print(f"[!] Duplicate bulundu:")
-            print(f"    Orjinal: {seen_hashes[config_hash][:80]}...")
-            print(f"    Duplikat: {config[:80]}...")
+            if duplicate_count <= 10:  # İlk 10 duplicate'i göster
+                print(f"[!] Duplicate bulundu:")
+                print(f"    Orjinal: {seen_hashes[config_hash][:80]}...")
+                print(f"    Duplikat: {config[:80]}...")
+    
+    if duplicate_count > 10:
+        print(f"[!] ... ve {duplicate_count - 10} duplicate daha")
     
     print("=" * 70)
     print(f"[+] Akıllı temizleme tamamlandı")
@@ -420,7 +323,7 @@ def remove_duplicates(configs):
 ##################################################
 
 def rename_all_configs(configs):
-    """Tüm configleri isimlendir (senkron - çünkü local database)"""
+    """Tüm configleri basit isimlendirme ile işle"""
     if not ENABLE_RENAME or not configs:
         return configs
     
@@ -431,7 +334,7 @@ def rename_all_configs(configs):
     renamed_configs = []
     
     for i, link in enumerate(configs, 1):
-        renamed = rename_config_local(link)
+        renamed = rename_config_simple(link)
         renamed_configs.append(renamed)
         
         if i % 50 == 0:
@@ -440,21 +343,14 @@ def rename_all_configs(configs):
     print("=" * 70)
     print("[+] ✅ İsimlendirme tamamlandı")
     
-    # Ülke dağılımı
+    # İstatistik göster
     if rename_counter:
         print("=" * 70)
-        print("🌍 ÜLKE DAĞILIMI:")
+        print("📊 İSİM DAĞILIMI (İlk 20):")
         print("=" * 70)
-        sorted_countries = sorted(rename_counter.items(), key=lambda x: x[1], reverse=True)
-        for cc_3letter, count in sorted_countries[:15]:
-            cc_2letter = None
-            for key, val in COUNTRY_CODE_MAP.items():
-                if val == cc_3letter:
-                    cc_2letter = key
-                    break
-            
-            flag = FLAGS.get(cc_2letter, "🌐") if cc_2letter else "🌐"
-            print(f"  {flag} {cc_3letter}: {count} config")
+        sorted_names = sorted(rename_counter.items(), key=lambda x: x[1], reverse=True)
+        for name, count in sorted_names[:20]:
+            print(f"  {name}: {count} adet")
         print("=" * 70)
     
     return renamed_configs
@@ -512,38 +408,29 @@ async def yandex_disk_upload(content):
 async def main():
     """Ana program"""
     print("=" * 70)
-    print("🚀 GitHub Action - GeoIP + Deduplication")
+    print("🚀 GitHub Action - Simple Rename (v2.0)")
     print("=" * 70)
     
     if not CONFIG_URLS or not YANDEX_TOKEN:
         print("[!] HATA: CONFIG_URLS veya YANDEX_TOKEN eksik!")
         sys.exit(1)
     
-    # 1. GeoIP database indir
-    if ENABLE_RENAME:
-        if not await download_geoip_db():
-            print("[!] GeoIP database yüklenemedi, isimlendirme devre dışı")
-    
-    # 2. Configleri çek
+    # 1. Configleri çek
     configs = await fetch_all_configs()
     
     if not configs:
         print("[!] ❌ Hiçbir config bulunamadı")
         sys.exit(1)
     
-    # 3. Akıllı duplicate temizleme
+    # 2. Akıllı duplicate temizleme
     unique_configs = remove_duplicates(configs)
     
-    # 4. İsimlendirme (senkron - local database)
+    # 3. Basit isimlendirme
     renamed_configs = rename_all_configs(unique_configs)
     
-    # 5. Yandex'e yükle
+    # 4. Yandex'e yükle
     content = "\n".join(renamed_configs)
     success = await yandex_disk_upload(content)
-    
-    # 6. GeoIP database temizle
-    if geoip_reader:
-        geoip_reader.close()
     
     if success:
         print("=" * 70)
