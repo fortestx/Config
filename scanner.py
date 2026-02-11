@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-GitHub Action Script - Simplified v2.3
-- GeoIP KALDIRILDI (gereksiz)
+GitHub Action Script - Simplified v3.0
+- Duplicate detection KALDIRILDI (basit tutuldu)
+- Sadece: veri çek -> isimlendir -> yükle
 - Mevcut bayrak/emoji kullanımı (🇩🇪, 🔥, vb.)
-- Ülke kodu + protokol ekleme (örn: 🇩🇪 DE-vless, 🔥 Best-trojan)
-- Akıllı duplicate detection korundu
-- FIX: vmess base64 configlerde ps alanından emoji/isim çekme eklendi
-- FIX: ps alanında URL decode desteği eklendi
-- FIX: İşlem sırası düzeltildi - önce isimlendirme, sonra duplicate temizleme
+- Ülke kodu + protokol ekleme (örn: 🇩🇪GER-vless1, 🔥trojan1)
+- vmess base64 configlerde ps alanından emoji/isim çekme
+- ps alanında URL decode desteği
 """
 
 import os
@@ -17,7 +16,6 @@ import aiohttp
 import re
 import json
 import base64
-import hashlib
 import urllib.parse
 
 sys.stdout.reconfigure(encoding='utf-8')
@@ -46,54 +44,6 @@ def safe_b64_decode(s):
         return base64.b64decode(s).decode("utf-8", errors="ignore")
     except:
         return ""
-
-def generate_config_hash(link):
-    """
-    Config'in benzersiz hash'ini oluştur (duplicate detection için)
-    Host, port, uuid/password kombinasyonuna göre
-    """
-    try:
-        if link.startswith("vless://"):
-            parsed = urllib.parse.urlparse(link)
-            uuid = parsed.username
-            host = parsed.hostname
-            port = parsed.port or 443
-            return hashlib.md5(f"vless:{uuid}@{host}:{port}".encode()).hexdigest()
-        
-        elif link.startswith("vmess://"):
-            data = json.loads(safe_b64_decode(link.replace("vmess://", "")))
-            uuid = data.get("id")
-            host = data.get("add")
-            port = data.get("port")
-            return hashlib.md5(f"vmess:{uuid}@{host}:{port}".encode()).hexdigest()
-        
-        elif link.startswith("trojan://"):
-            parsed = urllib.parse.urlparse(link)
-            password = parsed.username
-            host = parsed.hostname
-            port = parsed.port or 443
-            return hashlib.md5(f"trojan:{password}@{host}:{port}".encode()).hexdigest()
-        
-        elif link.startswith("ss://"):
-            base = link.split("#")[0]
-            return hashlib.md5(base.encode()).hexdigest()
-        
-        elif link.startswith("ssr://"):
-            base = link.split("#")[0]
-            return hashlib.md5(base.encode()).hexdigest()
-        
-        elif link.startswith("hysteria://"):
-            parsed = urllib.parse.urlparse(link)
-            host = parsed.hostname
-            port = parsed.port or 443
-            return hashlib.md5(f"hysteria:{host}:{port}".encode()).hexdigest()
-        
-        else:
-            base = link.split("#")[0]
-            return hashlib.md5(base.encode()).hexdigest()
-    
-    except:
-        return hashlib.md5(link.encode()).hexdigest()
 
 ##################################################
 # RENAME - BASİTLEŞTİRİLMİŞ + VMESS FIX
@@ -337,54 +287,14 @@ async def fetch_all_configs():
             elif isinstance(result, list):
                 all_configs.extend(result)
     
+    # Sadece basit duplicate temizleme (tamamen aynı stringler)
     unique_configs = list(dict.fromkeys(all_configs))
     
     print("=" * 70)
     print(f"[+] Toplam çekilen: {len(all_configs)} config")
-    print(f"[+] Benzersiz (basit): {len(unique_configs)} config")
+    print(f"[+] Benzersiz: {len(unique_configs)} config")
     if len(all_configs) > len(unique_configs):
-        print(f"[+] Basit duplikat: {len(all_configs) - len(unique_configs)} temizlendi")
-    print("=" * 70)
-    
-    return unique_configs
-
-##################################################
-# DUPLICATE DETECTION
-##################################################
-
-def remove_duplicates(configs):
-    """
-    Akıllı duplicate temizleme
-    Aynı server/port/uuid olan configleri temizle (isim farklı olsa bile)
-    """
-    print("=" * 70)
-    print("🔍 Akıllı duplicate detection başlatılıyor...")
-    print("=" * 70)
-    
-    seen_hashes = {}
-    unique_configs = []
-    duplicate_count = 0
-    
-    for config in configs:
-        config_hash = generate_config_hash(config)
-        
-        if config_hash not in seen_hashes:
-            seen_hashes[config_hash] = config
-            unique_configs.append(config)
-        else:
-            duplicate_count += 1
-            if duplicate_count <= 10:  # İlk 10 duplicate'i göster
-                print(f"[!] Duplicate bulundu:")
-                print(f"    Orjinal: {seen_hashes[config_hash][:80]}...")
-                print(f"    Duplikat: {config[:80]}...")
-    
-    if duplicate_count > 10:
-        print(f"[!] ... ve {duplicate_count - 10} duplicate daha")
-    
-    print("=" * 70)
-    print(f"[+] Akıllı temizleme tamamlandı")
-    print(f"[+] Benzersiz config: {len(unique_configs)}")
-    print(f"[+] Duplicate temizlendi: {duplicate_count}")
+        print(f"[+] Basit tekrar: {len(all_configs) - len(unique_configs)} temizlendi")
     print("=" * 70)
     
     return unique_configs
@@ -479,7 +389,7 @@ async def yandex_disk_upload(content):
 async def main():
     """Ana program"""
     print("=" * 70)
-    print("🚀 GitHub Action - Simple Rename (v2.3 - fix: rename before dedup)")
+    print("🚀 GitHub Action - Simple Rename (v3.0 - BASIT)")
     print("=" * 70)
     
     if not CONFIG_URLS or not YANDEX_TOKEN:
@@ -493,19 +403,16 @@ async def main():
         print("[!] ❌ Hiçbir config bulunamadı")
         sys.exit(1)
     
-    # 2. Basit isimlendirme (ÖNCE İSİMLENDİRME!)
+    # 2. İsimlendirme yap
     renamed_configs = rename_all_configs(configs)
     
-    # 3. Akıllı duplicate temizleme (İSİMLENDİRMEDEN SONRA!)
-    unique_configs = remove_duplicates(renamed_configs)
-    
-    # 4. Yandex'e yükle
-    content = "\n".join(unique_configs)
+    # 3. Yandex'e yükle
+    content = "\n".join(renamed_configs)
     success = await yandex_disk_upload(content)
     
     if success:
         print("=" * 70)
-        print(f"[+] ✅ İşlem tamamlandı: {len(unique_configs)} config yüklendi")
+        print(f"[+] ✅ İşlem tamamlandı: {len(renamed_configs)} config yüklendi")
         print("=" * 70)
         sys.exit(0)
     else:
