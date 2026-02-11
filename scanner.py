@@ -98,13 +98,13 @@ def generate_config_hash(link):
 
 def rename_config_simple(link):
     """
-    Basit isimlendirme - SADECE bayrak/emoji + ülke kodu + protokol
+    Basit isimlendirme - SADECE bayrak + ülke kodu + protokol (BOŞLUKSUZ)
     
     Giriş:  vless://...#🇯🇵 Tokyo Server Fast 123
-    Çıkış:  vless://...#🇯🇵 JAP-vless1
+    Çıkış:  vless://...#🇯🇵JAP-vless1
     
     Giriş:  trojan://...#🔥 Best Server
-    Çıkış:  trojan://...#🔥 trojan1
+    Çıkış:  trojan://...#🔥trojan1
     """
     if not ENABLE_RENAME:
         return link
@@ -116,7 +116,8 @@ def rename_config_simple(link):
     if '#' in link:
         base_config = link.split('#')[0]
         fragment = link.split('#', 1)[1]
-        fragment = urllib.parse.unquote(fragment)
+        # URL decode YAPMA - emoji'ler bozulur
+        # fragment = urllib.parse.unquote(fragment)  # KALDIRILDI
     else:
         # # yoksa
         base_config = link
@@ -148,7 +149,13 @@ def rename_config_simple(link):
             "JP": "JAP", "US": "USA", "DE": "GER", "GB": "GBR", "FR": "FRA",
             "TR": "TUR", "NL": "NLD", "SG": "SGP", "CA": "CAN", "HK": "HKG",
             "IT": "ITA", "ES": "ESP", "RU": "RUS", "KR": "KOR", "BR": "BRA",
-            "AU": "AUS", "IN": "IND", "SE": "SWE", "CH": "CHE", "CN": "CHN"
+            "AU": "AUS", "IN": "IND", "SE": "SWE", "CH": "CHE", "CN": "CHN",
+            "TW": "TWN", "MX": "MEX", "AR": "ARG", "CL": "CHL", "ZA": "ZAF",
+            "EG": "EGY", "IL": "ISR", "SA": "SAU", "AE": "ARE", "TH": "THA",
+            "VN": "VNM", "ID": "IDN", "MY": "MYS", "PH": "PHL", "NZ": "NZL",
+            "UA": "UKR", "HU": "HUN", "SK": "SVK", "BG": "BGR", "PL": "POL",
+            "FI": "FIN", "NO": "NOR", "DK": "DNK", "AT": "AUT", "BE": "BEL",
+            "CZ": "CZE", "IE": "IRL", "PT": "PRT", "GR": "GRC", "RO": "ROU"
         }
         country_3 = country_map.get(country_code, country_code)
         
@@ -158,8 +165,8 @@ def rename_config_simple(link):
             rename_counter[key] = 0
         rename_counter[key] += 1
         
-        # Yeni isim: 🇯🇵 JAP-vless1
-        new_name = f"{flag_emoji} {country_3}-{proto}{rename_counter[key]}"
+        # BOŞLUKSUZ: 🇯🇵JAP-vless1
+        new_name = f"{flag_emoji}{country_3}-{proto}{rename_counter[key]}"
     else:
         # Diğer emoji (🔥, 🌐, vb.)
         key = f"{flag_emoji}_{proto}"
@@ -167,8 +174,8 @@ def rename_config_simple(link):
             rename_counter[key] = 0
         rename_counter[key] += 1
         
-        # Yeni isim: 🔥 trojan1
-        new_name = f"{flag_emoji} {proto}{rename_counter[key]}"
+        # BOŞLUKSUZ: 🔥trojan1
+        new_name = f"{flag_emoji}{proto}{rename_counter[key]}"
     
     return f"{base_config}#{new_name}"
 
