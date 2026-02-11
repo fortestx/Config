@@ -98,12 +98,13 @@ def generate_config_hash(link):
 
 def rename_config_simple(link):
     """
-    Basit isimlendirme - sadece mevcut bayrak/emoji + protokol
-    Örnekler:
-      🇩🇪 DE-vless
-      🇺🇸 US-trojan
-      🔥 vless
-      vless (bayrak yoksa)
+    Basit isimlendirme - SADECE bayrak/emoji + ülke kodu + protokol
+    
+    Giriş:  vless://...#🇯🇵 Tokyo Server Fast 123
+    Çıkış:  vless://...#🇯🇵 JAP-vless1
+    
+    Giriş:  trojan://...#🔥 Best Server
+    Çıkış:  trojan://...#🔥 trojan1
     """
     if not ENABLE_RENAME:
         return link
@@ -111,44 +112,63 @@ def rename_config_simple(link):
     # Protokol al
     proto = link.split("://")[0].lower()
     
-    # Fragment (# sonrası) var mı kontrol et
-    if '#' not in link:
-        # Fragment yok - sadece protokol ekle
-        return f"{link}#{proto}"
+    # Config base'i al (# öncesi)
+    if '#' in link:
+        base_config = link.split('#')[0]
+        fragment = link.split('#', 1)[1]
+        fragment = urllib.parse.unquote(fragment)
+    else:
+        # # yoksa
+        base_config = link
+        fragment = ""
     
-    # Fragment'i ayır
-    base_config, fragment = link.rsplit('#', 1)
-    fragment = urllib.parse.unquote(fragment)
-    
-    # Emoji/Bayrak bul (herhangi bir emoji)
-    # Ülke bayrakları: 🇦-🇿 (2 karakter)
-    # Diğer emojiler: 🔥, 🌐, ⚡, vb.
+    # Emoji/Bayrak bul
     emoji_pattern = re.compile(r'([\U0001F1E6-\U0001F1FF]{2}|[\U0001F300-\U0001F9FF])')
     emoji_match = emoji_pattern.search(fragment)
     
     if not emoji_match:
-        # Emoji yok - sadece protokol
-        return f"{base_config}#{proto}"
+        # Bayrak yok - sadece protokol + numara
+        key = proto
+        if key not in rename_counter:
+            rename_counter[key] = 0
+        rename_counter[key] += 1
+        return f"{base_config}#{proto}{rename_counter[key]}"
     
+    # Bayrak var
     flag_emoji = emoji_match.group(1)
     
-    # Ülke bayrağı mı yoksa diğer emoji mi?
+    # Ülke bayrağı mı?
     if len(flag_emoji) == 2 and '\U0001F1E6' <= flag_emoji[0] <= '\U0001F1FF':
-        # Ülke bayrağı - 2 harfli koda çevir
-        # Örnek: 🇩🇪 → DE
+        # Ülke bayrağı → Koda çevir
         code_points = [ord(c) - 0x1F1E6 + ord('A') for c in flag_emoji]
         country_code = ''.join(chr(c) for c in code_points)
-        new_name = f"{flag_emoji} {country_code}-{proto}"
+        
+        # Örnek: 🇯🇵 → JP → JAP
+        country_map = {
+            "JP": "JAP", "US": "USA", "DE": "GER", "GB": "GBR", "FR": "FRA",
+            "TR": "TUR", "NL": "NLD", "SG": "SGP", "CA": "CAN", "HK": "HKG",
+            "IT": "ITA", "ES": "ESP", "RU": "RUS", "KR": "KOR", "BR": "BRA",
+            "AU": "AUS", "IN": "IND", "SE": "SWE", "CH": "CHE", "CN": "CHN"
+        }
+        country_3 = country_map.get(country_code, country_code)
+        
+        # Key oluştur: bayrak + ülke + protokol
+        key = f"{flag_emoji}_{country_3}_{proto}"
+        if key not in rename_counter:
+            rename_counter[key] = 0
+        rename_counter[key] += 1
+        
+        # Yeni isim: 🇯🇵 JAP-vless1
+        new_name = f"{flag_emoji} {country_3}-{proto}{rename_counter[key]}"
     else:
-        # Diğer emoji (🔥, 🌐, ⚡, vb.) - direkt kullan
-        new_name = f"{flag_emoji} {proto}"
-    
-    # Aynı isimden varsa numara ekle
-    if new_name in rename_counter:
-        rename_counter[new_name] += 1
-        new_name = f"{new_name}{rename_counter[new_name]}"
-    else:
-        rename_counter[new_name] = 1
+        # Diğer emoji (🔥, 🌐, vb.)
+        key = f"{flag_emoji}_{proto}"
+        if key not in rename_counter:
+            rename_counter[key] = 0
+        rename_counter[key] += 1
+        
+        # Yeni isim: 🔥 trojan1
+        new_name = f"{flag_emoji} {proto}{rename_counter[key]}"
     
     return f"{base_config}#{new_name}"
 
