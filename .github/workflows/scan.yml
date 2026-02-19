@@ -29,8 +29,8 @@ jobs:
       - name: Run scanner
         env:
           CONFIG_URLS: ${{ secrets.CONFIG_URLS }}
-          YANDEX_TOKEN: ${{ secrets.YANDEX_TOKEN }}
-          YANDEX_OUTPUT_FILE: ${{ secrets.YANDEX_OUTPUT_FILE }}
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          GITLAB_PROJECT_ID: ${{ secrets.GITLAB_PROJECT_ID }}
         run: python scanner.py
 
       - name: Upload logs (on failure)
