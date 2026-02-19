@@ -24,7 +24,7 @@ sys.stdout.reconfigure(encoding='utf-8')
 
 CONFIG_URLS = os.getenv("CONFIG_URLS")
 
-GITLAB_TOKEN = os.getenv("GITLAB_TOKEN", "glpat-9cWg7jJR-WTnu4Ufl3Zq3286MQp1OmtsZTk1Cw.01.12010dkca")
+GITLAB_TOKEN = os.getenv("GITLAB_TOKEN")
 GITLAB_PROJECT_ID = os.getenv("GITLAB_PROJECT_ID")
 GITLAB_BRANCH = os.getenv("GITLAB_BRANCH", "main")
 GITLAB_OUTPUT_FILE = os.getenv("GITLAB_OUTPUT_FILE", "working_configs.txt")
