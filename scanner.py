@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-GitHub Action Script - Simplified v3.0
-- Duplicate detection KALDIRILDI (basit tutuldu)
-- Sadece: veri çek -> isimlendir -> yükle
-- Mevcut bayrak/emoji kullanımı (🇩🇪, 🔥, vb.)
-- Ülke kodu + protokol ekleme (örn: 🇩🇪GER-vless1, 🔥trojan1)
-- vmess base64 configlerde ps alanından emoji/isim çekme
-- ps alanında URL decode desteği
+GitHub Action Script - GitLab Upload Version
+- Duplicate detection basit (string bazlı)
+- Rename aktif (emoji + ülke kodu + protokol)
+- vmess base64 ps update destekli
+- Çıktı GitLab repo içine commit edilir
 """
 
 import os
@@ -20,22 +18,29 @@ import urllib.parse
 
 sys.stdout.reconfigure(encoding='utf-8')
 
-# Ayarlar
+##################################################
+# ENV
+##################################################
+
 CONFIG_URLS = os.getenv("CONFIG_URLS")
-YANDEX_TOKEN = os.getenv("YANDEX_TOKEN")
-YANDEX_OUTPUT_FILE = os.getenv("YANDEX_OUTPUT_FILE", "/working_configs.txt")
-YANDEX_API_BASE = "https://cloud-api.yandex.net/v1/disk"
+
+GITLAB_TOKEN = os.getenv("GITLAB_TOKEN")
+GITLAB_PROJECT_ID = os.getenv("GITLAB_PROJECT_ID")
+GITLAB_BRANCH = os.getenv("GITLAB_BRANCH", "main")
+GITLAB_OUTPUT_FILE = os.getenv("GITLAB_OUTPUT_FILE", "working_configs.txt")
+
+GITLAB_API_BASE = "https://gitlab.com/api/v4"
+
 MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", "5"))
 ENABLE_RENAME = os.getenv("ENABLE_RENAME", "true").lower() == "true"
 
 rename_counter = {}
 
 ##################################################
-# PARSER HELPERS
+# HELPERS
 ##################################################
 
 def safe_b64_decode(s):
-    """Base64 decode - hata toleranslı"""
     try:
         s = s.strip().replace("-", "+").replace("_", "/")
         padding = len(s) % 4
@@ -46,37 +51,22 @@ def safe_b64_decode(s):
         return ""
 
 ##################################################
-# RENAME - BASİTLEŞTİRİLMİŞ + VMESS FIX
+# RENAME
 ##################################################
 
 def rename_config_simple(link):
-    """
-    Basit isimlendirme - SADECE bayrak + ülke kodu + protokol (BOŞLUKSUZ)
-    
-    Giriş:  vless://...#🇯🇵 Tokyo Server Fast 123
-    Çıkış:  vless://...#🇯🇵JAP-vless1
-    
-    Giriş:  trojan://...#🔥 Best Server
-    Çıkış:  trojan://...#🔥trojan1
-    
-    Giriş:  vmess://base64 (ps alanında 🇺🇸 USA Server)
-    Çıkış:  vmess://base64_with_updated_ps (🇺🇸USA-vmess1)
-    """
     if not ENABLE_RENAME:
         return link
-    
-    # Protokol al
+
     proto = link.split("://")[0].lower()
-    
-    # Config base'i ve fragment'i al
+
     if '#' in link:
         base_config = link.split('#')[0]
         fragment = link.split('#', 1)[1]
     else:
         base_config = link
         fragment = ""
-    
-    # vmess base64 ise ps alanından emoji çekmeyi dene
+
     vmess_data = None
     if proto == "vmess" and not fragment:
         try:
@@ -85,348 +75,196 @@ def rename_config_simple(link):
                 vmess_data = json.loads(decoded)
                 ps = vmess_data.get("ps", "")
                 if ps:
-                    # URL decode - emoji'ler encode edilmiş olabilir
-                    try:
-                        fragment = urllib.parse.unquote(ps)
-                    except:
-                        fragment = ps
+                    fragment = urllib.parse.unquote(ps)
         except:
             pass
-    
-    # Emoji/Bayrak bul
+
     emoji_pattern = re.compile(r'([\U0001F1E6-\U0001F1FF]{2}|[\U0001F300-\U0001F9FF])')
     emoji_match = emoji_pattern.search(fragment)
-    
+
     if not emoji_match:
-        # Bayrak yok - sadece protokol + numara
         key = proto
-        if key not in rename_counter:
-            rename_counter[key] = 0
-        rename_counter[key] += 1
+        rename_counter[key] = rename_counter.get(key, 0) + 1
         new_name = f"{proto}{rename_counter[key]}"
-        
-        # vmess için base64 içindeki ps'i güncelle
+
         if proto == "vmess" and vmess_data is not None:
             try:
                 vmess_data["ps"] = new_name
                 new_json = json.dumps(vmess_data, separators=(',', ':'), ensure_ascii=False)
-                new_b64 = base64.b64encode(new_json.encode('utf-8')).decode('utf-8')
+                new_b64 = base64.b64encode(new_json.encode()).decode()
                 return f"vmess://{new_b64}"
             except:
                 pass
-        
+
         return f"{base_config}#{new_name}"
-    
-    # Bayrak var
+
     flag_emoji = emoji_match.group(1)
-    
-    # Ülke bayrağı mı?
+
     if len(flag_emoji) == 2 and '\U0001F1E6' <= flag_emoji[0] <= '\U0001F1FF':
-        # Ülke bayrağı → Koda çevir
         code_points = [ord(c) - 0x1F1E6 + ord('A') for c in flag_emoji]
         country_code = ''.join(chr(c) for c in code_points)
-        
-        # Örnek: 🇯🇵 → JP → JAP
+
         country_map = {
-            "AL": "ALB", "JP": "JAP", "US": "USA", "DE": "GER", "GB": "GBR", "FR": "FRA",
-            "TR": "TUR", "NL": "NLD", "SG": "SGP", "CA": "CAN", "HK": "HKG",
-            "IT": "ITA", "ES": "ESP", "RU": "RUS", "KR": "KOR", "BR": "BRA",
-            "AU": "AUS", "IN": "IND", "SE": "SWE", "CH": "CHE", "CN": "CHN",
-            "TW": "TWN", "MX": "MEX", "AR": "ARG", "CL": "CHL", "ZA": "ZAF",
-            "EG": "EGY", "IL": "ISR", "SA": "SAU", "AE": "ARE", "TH": "THA",
-            "VN": "VNM", "ID": "IDN", "MY": "MYS", "PH": "PHL", "NZ": "NZL",
-            "UA": "UKR", "HU": "HUN", "SK": "SVK", "BG": "BGR", "PL": "POL",
-            "FI": "FIN", "NO": "NOR", "DK": "DNK", "AT": "AUT", "BE": "BEL",
-            "CZ": "CZE", "IE": "IRL", "PT": "PRT", "GR": "GRC", "RO": "ROU",
-            "LT": "LTU", "LV": "LVA", "EE": "EST", "SI": "SVN", "HR": "HRV",
-            "RS": "SRB", "BA": "BIH", "MK": "MKD", "ME": "MNE", "XK": "XKS"
+            "JP": "JAP", "US": "USA", "DE": "GER", "GB": "GBR", "FR": "FRA",
+            "TR": "TUR", "NL": "NLD", "SG": "SGP", "CA": "CAN", "HK": "HKG"
         }
+
         country_3 = country_map.get(country_code, country_code)
-        
-        # Key oluştur: bayrak + ülke + protokol
+
         key = f"{flag_emoji}_{country_3}_{proto}"
-        if key not in rename_counter:
-            rename_counter[key] = 0
-        rename_counter[key] += 1
-        
-        # BOŞLUKSUZ: 🇯🇵JAP-vless1
+        rename_counter[key] = rename_counter.get(key, 0) + 1
         new_name = f"{flag_emoji}{country_3}-{proto}{rename_counter[key]}"
     else:
-        # Diğer emoji (🔥, 🌐, vb.)
         key = f"{flag_emoji}_{proto}"
-        if key not in rename_counter:
-            rename_counter[key] = 0
-        rename_counter[key] += 1
-        
-        # BOŞLUKSUZ: 🔥trojan1
+        rename_counter[key] = rename_counter.get(key, 0) + 1
         new_name = f"{flag_emoji}{proto}{rename_counter[key]}"
-    
-    # vmess için base64 içindeki ps'i güncelle
+
     if proto == "vmess" and vmess_data is not None:
         try:
             vmess_data["ps"] = new_name
             new_json = json.dumps(vmess_data, separators=(',', ':'), ensure_ascii=False)
-            new_b64 = base64.b64encode(new_json.encode('utf-8')).decode('utf-8')
+            new_b64 = base64.b64encode(new_json.encode()).decode()
             return f"vmess://{new_b64}"
         except:
             pass
-    
+
     return f"{base_config}#{new_name}"
 
 ##################################################
-# URL FETCHING
+# URL PARSE
 ##################################################
 
 def parse_urls(raw_urls):
-    """URL listesini parse et"""
     if not raw_urls:
         return []
-    
+
     urls = []
-    lines = raw_urls.strip().split('\n')
-    
-    for line in lines:
+    for line in raw_urls.strip().split('\n'):
         line = line.strip()
         if not line or line.startswith('#'):
             continue
-        
-        if ',' in line or ';' in line:
-            parts = re.split('[,;]', line)
-            for part in parts:
-                url = part.strip()
-                if url and (url.startswith('http://') or url.startswith('https://')):
-                    urls.append(url)
-        else:
-            if line.startswith('http://') or line.startswith('https://'):
-                urls.append(line)
-    
-    # Duplikaları temizle
-    seen = set()
-    unique_urls = []
-    for url in urls:
-        if url not in seen:
-            seen.add(url)
-            unique_urls.append(url)
-    
-    return unique_urls
+        if line.startswith("http://") or line.startswith("https://"):
+            urls.append(line)
 
-async def fetch_configs_from_url(session, url, url_index, total_urls):
-    """Tek bir URL'den configleri çek"""
+    return list(dict.fromkeys(urls))
+
+##################################################
+# FETCH
+##################################################
+
+async def fetch_configs_from_url(session, url):
     try:
-        print(f"[-] [{url_index}/{total_urls}] URL çekiliyor: {url}")
-        
-        async with session.get(
-            url.strip(), 
-            timeout=aiohttp.ClientTimeout(total=45),
-            allow_redirects=True
-        ) as resp:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=45)) as resp:
             if resp.status != 200:
-                print(f"[!] [{url_index}/{total_urls}] ❌ HTTP {resp.status}: {url}")
+                print(f"[!] HTTP {resp.status}: {url}")
                 return []
-            
+
             raw_data = await resp.text()
-            
-            # Tüm proxy protokollerini destekle
             configs = []
-            supported_protocols = ['vless://', 'vmess://', 'trojan://', 'ss://', 'ssr://', 'hysteria://']
-            
+            supported = ['vless://', 'vmess://', 'trojan://', 'ss://', 'ssr://', 'hysteria://']
+
             for line in raw_data.splitlines():
                 line = line.strip()
-                if line and "://" in line:
-                    if any(proto in line for proto in supported_protocols):
-                        configs.append(line)
-            
-            print(f"[+] [{url_index}/{total_urls}] ✅ {len(configs)} config bulundu")
+                if any(p in line for p in supported):
+                    configs.append(line)
+
+            print(f"[+] {len(configs)} config bulundu: {url}")
             return configs
-    
+
     except Exception as e:
-        print(f"[!] [{url_index}/{total_urls}] ❌ Hata: {e}")
+        print(f"[!] Hata: {e}")
         return []
 
 async def fetch_all_configs():
-    """Tüm URL'lerden configleri çek"""
-    if not CONFIG_URLS:
-        print("[!] HATA: CONFIG_URLS tanımlanmamış!")
-        return None
-    
     url_list = parse_urls(CONFIG_URLS)
-    
     if not url_list:
-        print("[!] HATA: Geçerli URL bulunamadı!")
+        print("[!] Geçerli URL yok")
         return None
-    
-    print("=" * 70)
-    print(f"📋 Toplam {len(url_list)} URL bulundu")
-    print("=" * 70)
-    
-    for i, url in enumerate(url_list, 1):
-        print(f"  {i}. {url}")
-    
-    print("=" * 70)
-    
-    all_configs = []
-    connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT_REQUESTS, limit_per_host=2)
-    
+
+    connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT_REQUESTS)
     async with aiohttp.ClientSession(connector=connector) as session:
-        tasks = [
-            fetch_configs_from_url(session, url, i+1, len(url_list)) 
-            for i, url in enumerate(url_list)
-        ]
-        
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
-        
-        async def limited_fetch(task):
-            async with semaphore:
-                return await task
-        
-        results = await asyncio.gather(*[limited_fetch(task) for task in tasks], return_exceptions=True)
-        
-        for i, result in enumerate(results, 1):
-            if isinstance(result, Exception):
-                print(f"[!] [{i}/{len(url_list)}] ❌ Task hatası: {result}")
-            elif isinstance(result, list):
-                all_configs.extend(result)
-    
-    # Sadece basit duplicate temizleme (tamamen aynı stringler)
-    unique_configs = list(dict.fromkeys(all_configs))
-    
-    print("=" * 70)
-    print(f"[+] Toplam çekilen: {len(all_configs)} config")
-    print(f"[+] Benzersiz: {len(unique_configs)} config")
-    if len(all_configs) > len(unique_configs):
-        print(f"[+] Basit tekrar: {len(all_configs) - len(unique_configs)} temizlendi")
-    print("=" * 70)
-    
-    return unique_configs
+        tasks = [fetch_configs_from_url(session, u) for u in url_list]
+        results = await asyncio.gather(*tasks)
+
+    all_configs = []
+    for r in results:
+        all_configs.extend(r)
+
+    return list(dict.fromkeys(all_configs))
 
 ##################################################
-# İSİMLENDİRME
+# GITLAB UPLOAD
 ##################################################
 
-def rename_all_configs(configs):
-    """Tüm configleri basit isimlendirme ile işle"""
-    if not ENABLE_RENAME or not configs:
-        return configs
-    
-    print("=" * 70)
-    print(f"🏷️ İsimlendirme başlatılıyor ({len(configs)} config)...")
-    print("=" * 70)
-    
-    renamed_configs = []
-    
-    for i, link in enumerate(configs, 1):
-        renamed = rename_config_simple(link)
-        renamed_configs.append(renamed)
-        
-        if i % 50 == 0:
-            print(f"[-] İlerleme: {i}/{len(configs)}")
-    
-    print("=" * 70)
-    print("[+] ✅ İsimlendirme tamamlandı")
-    
-    # İstatistik göster
-    if rename_counter:
-        print("=" * 70)
-        print("📊 İSİM DAĞILIMI (İlk 20):")
-        print("=" * 70)
-        sorted_names = sorted(rename_counter.items(), key=lambda x: x[1], reverse=True)
-        for name, count in sorted_names[:20]:
-            print(f"  {name}: {count} adet")
-        print("=" * 70)
-    
-    return renamed_configs
-
-##################################################
-# YANDEX UPLOAD
-##################################################
-
-async def yandex_disk_upload(content):
-    """Yandex Disk'e yükle"""
-    if not YANDEX_TOKEN:
-        print("[!] HATA: YANDEX_TOKEN tanımlanmamış!")
+async def gitlab_upload(content):
+    if not GITLAB_TOKEN or not GITLAB_PROJECT_ID:
+        print("[!] GITLAB_TOKEN veya GITLAB_PROJECT_ID eksik")
         return False
-    
-    try:
-        headers = {"Authorization": f"OAuth {YANDEX_TOKEN}"}
-        
-        async with aiohttp.ClientSession() as session:
-            print(f"[-] Yandex Disk'e yükleniyor: {YANDEX_OUTPUT_FILE}")
-            
-            async with session.get(
-                f"{YANDEX_API_BASE}/resources/upload",
-                params={"path": YANDEX_OUTPUT_FILE, "overwrite": "true"},
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
-                if resp.status != 200:
-                    print(f"[!] ❌ Yandex API hatası: {resp.status}")
-                    return False
-                
-                data = await resp.json()
-                upload_url = data.get("href")
-            
-            async with session.put(
-                upload_url,
-                data=content.encode('utf-8'),
-                timeout=aiohttp.ClientTimeout(total=60)
-            ) as resp:
-                if resp.status in [201, 202]:
-                    print(f"[+] ✅ Başarılı: {YANDEX_OUTPUT_FILE}")
-                    print(f"[+] 📊 {len(content)} byte ({len(content.splitlines())} satır)")
+
+    headers = {
+        "PRIVATE-TOKEN": GITLAB_TOKEN,
+        "Content-Type": "application/json"
+    }
+
+    file_path_encoded = urllib.parse.quote(GITLAB_OUTPUT_FILE, safe="")
+    file_url = f"{GITLAB_API_BASE}/projects/{GITLAB_PROJECT_ID}/repository/files/{file_path_encoded}"
+
+    async with aiohttp.ClientSession() as session:
+
+        async with session.get(file_url, headers=headers, params={"ref": GITLAB_BRANCH}) as check:
+            exists = check.status == 200
+
+        payload = {
+            "branch": GITLAB_BRANCH,
+            "content": content,
+            "commit_message": "Auto update working configs"
+        }
+
+        if exists:
+            async with session.put(file_url, headers=headers, json=payload) as resp:
+                if resp.status == 200:
+                    print("[+] Dosya güncellendi")
                     return True
                 else:
-                    print(f"[!] ❌ Upload hatası: {resp.status}")
+                    print("[!] Update hatası:", resp.status)
+                    print(await resp.text())
                     return False
-    
-    except Exception as e:
-        print(f"[!] Upload hatası: {e}")
-        return False
+        else:
+            async with session.post(file_url, headers=headers, json=payload) as resp:
+                if resp.status == 201:
+                    print("[+] Dosya oluşturuldu")
+                    return True
+                else:
+                    print("[!] Create hatası:", resp.status)
+                    print(await resp.text())
+                    return False
 
 ##################################################
 # MAIN
 ##################################################
 
 async def main():
-    """Ana program"""
-    print("=" * 70)
-    print("🚀 GitHub Action - Simple Rename (v3.0 - BASIT)")
-    print("=" * 70)
-    
-    if not CONFIG_URLS or not YANDEX_TOKEN:
-        print("[!] HATA: CONFIG_URLS veya YANDEX_TOKEN eksik!")
+    print("🚀 GitLab Config Updater")
+
+    if not CONFIG_URLS or not GITLAB_TOKEN:
+        print("[!] CONFIG_URLS veya GITLAB_TOKEN eksik")
         sys.exit(1)
-    
-    # 1. Configleri çek
+
     configs = await fetch_all_configs()
-    
     if not configs:
-        print("[!] ❌ Hiçbir config bulunamadı")
+        print("[!] Hiç config bulunamadı")
         sys.exit(1)
-    
-    # 2. İsimlendirme yap
-    renamed_configs = rename_all_configs(configs)
-    
-    # 3. Yandex'e yükle
-    content = "\n".join(renamed_configs)
-    success = await yandex_disk_upload(content)
-    
+
+    renamed = [rename_config_simple(c) for c in configs]
+    content = "\n".join(renamed)
+
+    success = await gitlab_upload(content)
+
     if success:
-        print("=" * 70)
-        print(f"[+] ✅ İşlem tamamlandı: {len(renamed_configs)} config yüklendi")
-        print("=" * 70)
+        print(f"[+] ✅ {len(renamed)} config yüklendi")
         sys.exit(0)
     else:
-        print("[!] ❌ Yükleme başarısız!")
         sys.exit(1)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n[!] ⚠️ Durduruldu")
-        sys.exit(130)
-    except Exception as e:
-        print(f"[!] ❌ Fatal: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    asyncio.run(main())
